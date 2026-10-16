@@ -2,10 +2,6 @@
 from falkordb import FalkorDB
 from dataset_registry import get_graph, validate_dataset_id, get_dataset_metadata
 
-db = FalkorDB(host="localhost", port=6379)
-graph = db.select_graph("FraudTrace")
-
-
 def detect_connected_accounts(account_id: str, dataset_id: str = "demo_synthetic"):
     dataset_id = validate_dataset_id(dataset_id)
     target_graph = get_graph(dataset_id)
