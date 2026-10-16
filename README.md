@@ -503,42 +503,6 @@ Production use would require representative data, privacy and access controls, a
 
 ---
 
-## Demo Walkthrough
-
-A concise demonstration can follow this sequence:
-
-1. Introduce the challenge of investigating connected transaction activity.
-2. Open the FraudTrace AI dashboard.
-3. Investigate synthetic account `ACC002`.
-4. Show the connected accounts and shared-device signals.
-5. Change graph traversal depth from 1 to 2 to 3.
-6. Inspect transaction and merchant evidence.
-7. Ask the investigation assistant why the account warrants review.
-8. Generate and open the PDF case report.
-9. Explain the graph model and the role of FalkorDB.
-10. Close by explaining the synthetic-data limitation and the importance of human review.
-
-During the demo, distinguish between observed graph relationships and conclusions that would require further investigation.
-
----
-
-## Hackathon Submission Checklist
-
-- [ ] Confirm the public GitHub repository is accessible.
-- [ ] Verify that the README setup instructions work in a clean environment.
-- [ ] Document the graph model and representative Cypher queries.
-- [ ] Verify that dependencies are correctly listed in `requirements.txt`.
-- [ ] Confirm `.gitignore` excludes virtual environments, secrets, and temporary files.
-- [ ] Run the API smoke tests and PDF regression tests.
-- [ ] Record a concise demonstration of the working application.
-- [ ] Verify that the demo video link is accessible.
-- [ ] Select the hackathon track that best matches the actual implementation.
-- [ ] Complete the required submission form.
-- [ ] Disclose AI-assisted development according to the event's rules.
-- [ ] Ensure public artifacts contain no credentials or real customer data.
-
----
-
 ## Future Improvements
 
 Potential future work includes:
