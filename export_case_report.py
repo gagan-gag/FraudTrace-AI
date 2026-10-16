@@ -18,10 +18,12 @@ It does not establish that an account or person committed fraud.
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 import requests
 from reportlab.lib import colors
@@ -101,6 +103,63 @@ def post_json(
     return result
 
 
+def sanitize_unicode_for_pdf(text: str) -> str:
+    """
+    Normalize Unicode characters that standard Helvetica cannot render
+    into clean, readable Latin-1 / ASCII equivalents to prevent black squares.
+    """
+    if not isinstance(text, str):
+        text = str(text) if text is not None else ""
+
+    replacements = {
+        "【": "[",
+        "】": "]",
+        "\u2011": "-",   # Non-breaking hyphen
+        "\u2013": " - ", # En-dash
+        "\u2014": " - ", # Em-dash
+        "\u2018": "'",   # Left single quotation mark
+        "\u2019": "'",   # Right single quotation mark
+        "\u201c": '"',   # Left double quotation mark
+        "\u201d": '"',   # Right double quotation mark
+        "→": "->",       # Right arrow
+        "➔": "->",       # Heavy right arrow
+        "⟶": "->",       # Long right arrow
+        "•": "*",        # Bullet symbol
+        "●": "*",        # Black circle
+        "₹": "INR ",     # Indian Rupee symbol
+    }
+
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+
+    # Strip emojis or exotic non-Latin-1 symbols that trigger .notdef missing glyph boxes
+    cleaned = []
+    for ch in text:
+        if ord(ch) < 256:
+            cleaned.append(ch)
+        else:
+            cleaned.append(" ")
+    return "".join(cleaned)
+
+
+def format_inline_markdown(text: str) -> str:
+    """Convert Markdown bold, italics, code, and sanitize Unicode for ReportLab Paragraphs."""
+    text = sanitize_unicode_for_pdf(text)
+    text = escape(text)
+
+    # Convert bold: **bold** or __bold__ to <b>bold</b>
+    text = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", text)
+    text = re.sub(r"__(.+?)__", r"<b>\1</b>", text)
+
+    # Convert italic: *italic* or _italic_ to <i>italic</i>
+    text = re.sub(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+
+    # Convert inline code: `code` to <font name="Courier">code</font>
+    text = re.sub(r"`(.+?)`", r'<font name="Courier">\1</font>', text)
+
+    return text
+
+
 def printable(value: Any, limit: int = 1800) -> str:
     """Convert arbitrary API values into readable report text."""
     if value is None:
@@ -118,11 +177,10 @@ def printable(value: Any, limit: int = 1800) -> str:
 
 
 def safe_paragraph(value: Any, limit: int = 1800) -> str:
-    """Escape API-supplied text before rendering it as a PDF paragraph."""
-    from xml.sax.saxutils import escape
-
-    text = printable(value, limit)
-    return escape(text).replace("\n", "<br/>")
+    """Escape and format API-supplied text before rendering it as a PDF paragraph."""
+    raw = printable(value, limit)
+    formatted = format_inline_markdown(raw)
+    return formatted.replace("\n", "<br/>")
 
 
 def first_value(
@@ -239,7 +297,88 @@ def make_styles():
         )
     )
 
+    styles.add(
+        ParagraphStyle(
+            name="SubHeading",
+            parent=styles["Heading3"],
+            fontName="Helvetica-Bold",
+            fontSize=10,
+            leading=14,
+            textColor=NAVY,
+            spaceBefore=6,
+            spaceAfter=3,
+            keepWithNext=True,
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="NumberedItem",
+            parent=styles["BodyText"],
+            fontSize=8.5,
+            leading=12,
+            textColor=DARK_GREY,
+            leftIndent=14,
+            firstLineIndent=-10,
+            spaceAfter=3,
+        )
+    )
+
+    styles.add(
+        ParagraphStyle(
+            name="BulletItem",
+            parent=styles["BodyText"],
+            fontSize=8.5,
+            leading=12,
+            textColor=DARK_GREY,
+            leftIndent=14,
+            firstLineIndent=-8,
+            spaceAfter=3,
+        )
+    )
+
     return styles
+
+
+def add_markdown_flowables(story, markdown_text: str, styles):
+    """
+    Parse a Markdown string (headings, numbered steps, bullet points, bold sections)
+    into cleanly styled ReportLab Flowable paragraphs without raw markdown markers.
+    """
+    if not markdown_text:
+        return
+
+    lines = str(markdown_text).splitlines()
+    for line in lines:
+        line_strip = line.strip()
+        if not line_strip:
+            continue
+
+        # Markdown headings: ###, ##, #
+        heading_match = re.match(r"^#{1,4}\s+(.+)$", line_strip)
+        if heading_match:
+            heading_content = format_inline_markdown(heading_match.group(1))
+            story.append(Paragraph(heading_content, styles["SubHeading"]))
+            continue
+
+        # Numbered list: 1. ...
+        numbered_match = re.match(r"^(\d+)\.\s+(.+)$", line_strip)
+        if numbered_match:
+            num = numbered_match.group(1)
+            content = format_inline_markdown(numbered_match.group(2))
+            story.append(Paragraph(f"<b>{num}.</b> {content}", styles["NumberedItem"]))
+            continue
+
+        # Bullet list: * ... or - ...
+        bullet_match = re.match(r"^[\*\-]\s+(.+)$", line_strip)
+        if bullet_match:
+            content = format_inline_markdown(bullet_match.group(1))
+            story.append(Paragraph(f"&bull;&nbsp; {content}", styles["BulletItem"]))
+            continue
+
+        # Standard paragraph with inline formatting
+        formatted_line = format_inline_markdown(line_strip)
+        story.append(Paragraph(formatted_line, styles["BodySmall"]))
 
 
 def make_table(
@@ -481,6 +620,8 @@ def build_report(
     graph_data: dict[str, Any],
     assistant: dict[str, Any],
     hops: int,
+    dataset_id: str = "demo_synthetic",
+    dataset_metadata: dict[str, Any] | None = None,
 ):
     """Build the complete PDF case report."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -489,6 +630,11 @@ def build_report(
 
     generated_at = datetime.now(timezone.utc).strftime(
         "%Y-%m-%d %H:%M UTC"
+    )
+
+    dataset_name = (dataset_metadata or {}).get(
+        "display_name",
+        "FraudTrace AI Synthetic Demo" if dataset_id == "demo_synthetic" else "IBM AMLSim Sample Dataset",
     )
 
     story.append(Spacer(1, 12 * mm))
@@ -503,6 +649,7 @@ def build_report(
 
     overview_rows = [
         ["Case account", account_id],
+        ["Dataset", f"{dataset_name} ({dataset_id})"],
         ["Generated at", generated_at],
         ["Graph traversal depth", str(hops)],
         [
@@ -555,13 +702,24 @@ def build_report(
     )
 
     story.append(Spacer(1, 5 * mm))
+
+    disclaimer_text = (
+        (dataset_metadata or {}).get("disclaimer")
+        or (
+            "IBM AMLSim transaction simulation data. Device/IP and merchant relationships are not present in this schema. "
+            "A risk label or flagged transaction is a review signal, not a determination of criminal activity."
+            if dataset_id == "ibm_amlsim"
+            else (
+                "This report summarizes the evidence returned by the FraudTrace AI demonstration system. "
+                "A risk label or flagged transaction is a review signal, not a determination of criminal activity. "
+                "Shared devices, IP addresses, or merchants can have legitimate explanations."
+            )
+        )
+    )
+
     story.append(
         Paragraph(
-            "<b>Scope and limitation:</b> This report summarizes the "
-            "evidence returned by the FraudTrace AI demonstration system. "
-            "A risk label or flagged transaction is a review signal, not "
-            "a determination of criminal activity. Shared devices, IP "
-            "addresses, or merchants can have legitimate explanations.",
+            f"<b>Scope and limitation:</b> {disclaimer_text}",
             styles["Warning"],
         )
     )
@@ -649,12 +807,10 @@ def build_report(
             styles["BodySmall"],
         )
     )
-    story.append(
-        Paragraph(
-            f"<b>Answer:</b> {safe_paragraph(answer, limit=3500)}",
-            styles["BodySmall"],
-        )
-    )
+    story.append(Spacer(1, 2 * mm))
+    story.append(Paragraph("<b>Assistant Findings & Analysis:</b>", styles["SubHeading"]))
+    add_markdown_flowables(story, answer, styles)
+    story.append(Spacer(1, 3 * mm))
 
     assistant_evidence = assistant.get("evidence", [])
     if isinstance(assistant_evidence, list) and assistant_evidence:
@@ -732,9 +888,15 @@ def main():
         default=DEFAULT_API_URL,
         help=f"FastAPI base URL (default: {DEFAULT_API_URL})",
     )
+    parser.add_argument(
+        "--dataset",
+        default="demo_synthetic",
+        help="Dataset identifier: demo_synthetic or ibm_amlsim (default: demo_synthetic)",
+    )
 
     args = parser.parse_args()
     account_id = args.account.strip().upper()
+    dataset_id = args.dataset.strip()
 
     if not account_id:
         parser.error("--account cannot be empty")
@@ -748,6 +910,7 @@ def main():
     print("FRAUDTRACE AI — CASE REPORT EXPORT")
     print("=" * 60)
     print(f"Account: {account_id}")
+    print(f"Dataset: {dataset_id}")
     print(f"Graph depth: {args.hops}")
     print(f"API: {args.api}")
     print(f"Output: {output_path}")
@@ -772,21 +935,21 @@ def main():
             investigation = get_json(
                 session,
                 args.api,
-                f"/investigate/{account_id}",
+                f"/investigate/{account_id}?dataset={dataset_id}",
             )
 
             print("[3/5] Fetching transaction evidence...")
             account_evidence = get_json(
                 session,
                 args.api,
-                f"/account-evidence/{account_id}",
+                f"/account-evidence/{account_id}?dataset={dataset_id}",
             )
 
             print("[4/5] Fetching graph and assistant evidence...")
             graph_data = get_json(
                 session,
                 args.api,
-                f"/graph/{account_id}?hops={args.hops}",
+                f"/graph/{account_id}?hops={args.hops}&dataset={dataset_id}",
             )
 
             assistant = post_json(
@@ -796,6 +959,7 @@ def main():
                 {
                     "account_id": account_id,
                     "question": "Why is this account suspicious?",
+                    "dataset_id": dataset_id,
                 },
             )
 
@@ -814,6 +978,7 @@ def main():
             graph_data=graph_data,
             assistant=assistant,
             hops=args.hops,
+            dataset_id=dataset_id,
         )
 
         print()

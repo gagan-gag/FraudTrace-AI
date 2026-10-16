@@ -18,12 +18,14 @@ Investigators can explore graph neighborhoods at different depths, review suppor
 - [Problem Statement](#problem-statement)
 - [Solution](#solution)
 - [Key Features](#key-features)
+- [Multi-Dataset Architecture](#multi-dataset-architecture)
 - [System Architecture](#system-architecture)
 - [Technology Stack](#technology-stack)
 - [Graph Data Model](#graph-data-model)
 - [Example Cypher Queries](#example-cypher-queries)
 - [Project Structure](#project-structure)
 - [Installation and Setup](#installation-and-setup)
+- [Port Configuration & Conflict Troubleshooting](#port-configuration--conflict-troubleshooting)
 - [Running the Application](#running-the-application)
 - [API Reference](#api-reference)
 - [Testing](#testing)
@@ -70,41 +72,54 @@ The goal is to make connected evidence easier to explore and explain while keepi
 
 ## Key Features
 
-### 1. Graph-powered investigation
-
+### 1. Graph-Powered Investigation with FalkorDB
 Uses FalkorDB to store entities and relationships and retrieve connected graph neighborhoods.
 
-### 2. Multi-hop graph exploration
+### 2. Interactive 3D Molecular Network Visualization
+Renders genuine 3D molecular networks where nodes are spherical 'atoms' and edges are chemical 'bonds' with relationship-coded colors, smooth 3D orbit rotation, zoom, pan, and responsive layout modes (3D Molecular, 2D Force-Directed, 3D Spherical Orbit).
 
-Supports graph traversal depths of 1, 2, and 3 through the investigation API.
+### 3. Real Multi-Hop Path Finder
+Discovers and traces genuine multi-hop paths between any two entities in FalkorDB (e.g. Account → Device → Account, Account → IPAddress → Account, Account → Transaction → Merchant) with ordered step visualization and supporting evidence references.
 
-### 3. Connected-account signals
+### 4. Suspicious Cluster & Ring Detection
+Discovers multi-account clusters sharing infrastructure (devices, IP addresses, merchants) with explainable heuristic risk scoring and flagged transaction breakdowns.
 
-Identifies relationships involving shared devices, IP addresses, and merchants.
+### 5. Connected-Account Signals
+Identifies relationships involving shared devices, IP addresses, and merchants with transparent review priorities (HIGH, MEDIUM, REVIEW).
 
-### 4. Transaction evidence
+### 6. Transaction Evidence
+Retrieves transaction details, merchant associations, amounts, and transaction status with UTF-8 safe currency formatting.
 
-Retrieves transaction details, merchant associations, amounts, and transaction status.
+### 7. Evidence-Grounded Investigation Assistant
+Produces structured investigation summaries using available graph evidence, with deterministic question routing, stable evidence references (`EV-LINK-...`, `EV-TXN-...`), and persistent case memory.
 
-### 5. Interactive dashboard
+### 8. Persistent Case Memory (Track 02)
+Stores investigation observations in FalkorDB linked to accounts (`:HAS_INVESTIGATION_MEMORY`), enabling cross-session recall and search across sessions.
 
-Provides a Streamlit interface for selecting accounts, exploring evidence, viewing graph relationships, and interacting with the investigation assistant.
+### 9. PDF Case Report Generation
+Exports comprehensive investigation findings, related accounts, transaction evidence, graph details, assistant output, and audit notes into court-ready PDFs.
 
-### 6. Evidence-grounded investigation assistant
+### 10. Multi-Dataset Support & Dataset Isolation
+Allows seamless switching between synthetic demonstration data (`demo_synthetic` graph: `FraudTrace`) and real-world-style transaction networks (`ibm_amlsim` graph: `ibm_amlsim`). Strict server-side allowlisting guarantees complete graph isolation and prevents cross-contamination.
 
-Produces structured investigation summaries using available graph evidence and predefined reasoning logic.
+### 11. Automated Test Suite
+Includes 30 comprehensive unit tests across 5 test suites plus 28 automated API smoke checks (58 total tests passed, 0 failures).
 
-### 7. PDF case report generation
+---
 
-Exports investigation findings, related accounts, transaction evidence, graph details, assistant output, and audit notes.
+## Multi-Dataset Architecture
 
-### 8. REST API
+FraudTrace AI supports two distinct graph datasets simultaneously:
 
-Exposes the application's investigation capabilities through FastAPI endpoints.
+| Dataset ID | Graph Name | Focus & Characteristics | Key Entities & Labels | Recommended Starting Account |
+|---|---|---|---|---|
+| `demo_synthetic` | `FraudTrace` | Synthetic fraud ring with shared infrastructure signals | `Account`, `Device`, `IPAddress`, `Merchant`, `Transaction` | `ACC002` (Shares device with `ACC001`) |
+| `ibm_amlsim` | `ibm_amlsim` | Transaction network with alerting and money-laundering typologies | `AMLAccount`, `AMLTransaction`, `AMLAlert` | `AML_ACC_25` (Has alert `AML_ALERT_1`) |
 
-### 9. Automated tests
-
-Includes API smoke tests and PDF exporter regression tests.
+### Key Guarantees:
+1. **Server-Side Allowlist**: Controlled via `DATASET_ALLOWLIST = frozenset({"demo_synthetic", "ibm_amlsim"})` in [dataset_registry.py](file:///d:/PROJECTS/FraudTrace%20AI/dataset_registry.py). Arbitrary graph names are strictly rejected with HTTP 400.
+2. **Schema Preservation**: The AMLSim dataset does not invent fake device/IP entities; instead, accounts connect via counterparty transactions (`AML_SENT`, `AML_RECEIVED`) and shared alerts (`HAS_ALERT`).
+3. **Investigation Assistant Awareness**: The assistant explicitly informs the investigator of the active dataset and adapts its traversal logic accordingly.
 
 ---
 
@@ -284,22 +299,28 @@ The application API restricts the requested traversal depth to values between 1 
 
 ```text
 FraudTrace AI/
-├── app.py
-├── dashboard.py
-├── seed_graph.py
-├── inspect_graph.py
-├── investigate.py
-├── ring_detection.py
-├── ai_assistant.py
-├── export_case_report.py
-├── smoke_test.py
-├── test_case_report.py
-├── test_falkordb.py
-├── requirements.txt
-├── .gitignore
-├── README.md
-└── reports/
-    └── ACC002_case_report.pdf
+├── app.py                      # FastAPI REST application
+├── dashboard.py                # Streamlit 3D molecular investigation dashboard
+├── dataset_registry.py         # Multi-dataset allowlist and registry
+├── amlsim_importer.py          # IBM AMLSim CSV graph importer
+├── amlsim_data/                # AMLSim CSV source data (accounts, tx, alerts)
+├── seed_graph.py               # Synthetic demo graph initialization
+├── inspect_graph.py            # Graph exploration and Cypher inspector
+├── investigate.py              # Account investigation and risk scoring
+├── ring_detection.py           # Multi-hop paths & cluster detection
+├── case_memory.py              # Persistent case memory module (Track 02)
+├── ai_assistant.py             # Grounded AI investigation assistant
+├── export_case_report.py       # PDF case dossier report generator
+├── smoke_test.py               # Automated 28-point API smoke test
+├── test_case_memory.py         # Unit tests: Case memory persistence
+├── test_case_report.py         # Unit tests: PDF report formatting
+├── test_enhanced_features.py   # Unit tests: Multi-hop paths & clusters
+├── test_amlsim_importer.py     # Unit tests: AMLSim dataset importer
+├── test_dataset_isolation.py   # Unit tests: Strict graph isolation
+├── test_falkordb.py            # FalkorDB connectivity test
+├── requirements.txt            # Python dependencies
+├── README.md                   # Full system documentation
+└── reports/                    # Generated forensic case dossiers (PDFs)
 ```
 
 The `reports/` directory contains generated demonstration output. Keep the sample report in the public repository only if you intend to publish it as a synthetic example.
@@ -342,57 +363,110 @@ python -m pip install -r requirements.txt
 
 ### 4. Start FalkorDB
 
-If you do not already have a FalkorDB container, create one:
+FraudTrace AI expects FalkorDB running locally on port `6379`.
+
+If you do not already have a container named `falkordb`, create one:
 
 ```powershell
 docker run -d --name falkordb -p 6379:6379 -p 3001:3000 falkordb/falkordb:latest
 ```
 
-If the container already exists, start it:
+If the container already exists (or after a reboot), simply start it:
 
 ```powershell
 docker start falkordb
 ```
 
-Verify the container:
+Verify that the container is running:
 
 ```powershell
-docker ps
+docker ps --filter "name=falkordb"
 ```
 
-The application expects FalkorDB at `localhost:6379`. The host port `3001` maps to container port `3000` for the browser interface.
+### 5. Seed Demonstration Datasets
 
-### 5. Seed the demonstration graph
+FraudTrace AI includes two graphs:
 
-```powershell
-python seed_graph.py
-```
+1. **Synthetic Demo Graph (`FraudTrace`)**:
+   ```powershell
+   python seed_graph.py
+   ```
+   > **Note:** Run this script only once on initial setup. Do not re-run repeatedly to avoid wiping custom case memories or resetting state.
 
-Use the graph initialization workflow provided by the project. Before running the seeding script repeatedly, inspect whether it clears the graph or creates additional records.
+2. **IBM AMLSim Graph (`ibm_amlsim`)**:
+   ```powershell
+   python amlsim_importer.py
+   ```
+   *(Optional: run with `--dry-run` to preview records without modifying database).*
+
+---
+
+## Port Configuration & Conflict Troubleshooting
+
+FraudTrace AI uses three local network ports:
+
+| Service | Default Port | Environment Variable / Flag | Purpose |
+|---|---|---|---|
+| **FalkorDB** | `6379` | `FALKORDB_PORT=6379` | Graph database engine |
+| **FastAPI Backend** | `8010` | `--port 8010` | REST API & Investigation engine |
+| **Streamlit Dashboard** | `8501` | `--server.port 8501` | User interface & 3D visualization |
+
+### Preventing and Resolving Port Conflicts
+
+If you see an error like `[Errno 10048] error while attempting to bind on address ('127.0.0.1', 8010)` or Docker container name conflicts, use the following quick fixes:
+
+#### 1. Port 8010 already in use (FastAPI backend)
+A previous backend instance or terminal session may still be running in the background.
+
+* **Find and kill process on port 8010 (PowerShell)**:
+  ```powershell
+  Get-NetTCPConnection -LocalPort 8010 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+  ```
+* **Or run on an alternate port**:
+  ```powershell
+  python -m uvicorn app:app --host 127.0.0.1 --port 8020
+  ```
+
+#### 2. Port 8501 already in use (Streamlit dashboard)
+* **Kill existing Streamlit process (PowerShell)**:
+  ```powershell
+  Get-NetTCPConnection -LocalPort 8501 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+  ```
+* **Or let Streamlit pick another port**:
+  ```powershell
+  streamlit run dashboard.py --server.port 8502
+  ```
+
+#### 3. Docker Conflict: container name "/falkordb" is already in use
+This occurs if you run `docker run` when the container was previously created.
+* **Fix**: Run `docker start falkordb` instead of `docker run`.
+* If you need to recreate it from scratch:
+  ```powershell
+  docker rm -f falkordb
+  docker run -d --name falkordb -p 6379:6379 -p 3001:3000 falkordb/falkordb:latest
+  ```
 
 ---
 
 ## Running the Application
 
-### Terminal 1 — Start the API
+Follow these steps to launch the entire stack:
 
-Activate the virtual environment and run:
+### Step 1: Start the FastAPI Backend (Terminal 1)
 
 ```powershell
+cd "D:\PROJECTS\FraudTrace AI"
+.\.venv\Scripts\Activate.ps1
 python -m uvicorn app:app --host 127.0.0.1 --port 8010
 ```
 
-The API should be available at:
-
-- Root: `http://127.0.0.1:8010/`
-- Health check: `http://127.0.0.1:8010/health`
-- Interactive API documentation: `http://127.0.0.1:8010/docs`
+Verify backend health by visiting:
+- Health check: [http://127.0.0.1:8010/health](http://127.0.0.1:8010/health) (returns `{"status":"healthy","database":"FalkorDB","graphs":["FraudTrace","ibm_amlsim"]}`)
+- Interactive Swagger docs: [http://127.0.0.1:8010/docs](http://127.0.0.1:8010/docs)
 
 Keep this terminal running.
 
-### Terminal 2 — Start the dashboard
-
-Open another PowerShell terminal:
+### Step 2: Start the Dashboard (Terminal 2)
 
 ```powershell
 cd "D:\PROJECTS\FraudTrace AI"
@@ -400,76 +474,97 @@ cd "D:\PROJECTS\FraudTrace AI"
 streamlit run dashboard.py
 ```
 
-Open the local URL displayed by Streamlit.
+The Streamlit UI opens automatically in your browser at:
+- Dashboard: [http://localhost:8501](http://localhost:8501)
 
-The API and FalkorDB must be running for the dashboard to retrieve live investigation data.
+### Using the Multi-Dataset Dashboard
+1. Use the **Dataset Selector** in the sidebar to switch between `FraudTrace AI Demo (Synthetic)` and `IBM AMLSim (Transaction Network)`.
+2. Enter an account to investigate (`ACC002` for Demo; `AML_ACC_25` for AMLSim).
+3. Click **Generate / Refresh 3D Graph** to inspect the 3D molecular graph.
+4. Interact with the **AI Investigation Assistant** to explore suspicious patterns.
+5. Click **Export PDF Report** to download the court-ready case dossier.
 
 ---
 
 ## API Reference
 
-| Method | Endpoint | Purpose |
-|---|---|---|
-| `GET` | `/` | API root |
-| `GET` | `/health` | API and database health check |
-| `GET` | `/investigate/{account_id}` | Retrieve connected-account investigation results |
-| `GET` | `/account-evidence/{account_id}` | Retrieve transaction evidence |
-| `GET` | `/graph/{account_id}?hops=2` | Retrieve a bounded graph neighborhood |
-| `POST` | `/ask` | Request an investigation assistant response |
-| `GET` | `/docs` | Interactive API documentation |
+| Method | Endpoint | Query / Body Params | Purpose |
+|---|---|---|---|
+| `GET` | `/` | — | API root information |
+| `GET` | `/health` | — | API & FalkorDB graph health check |
+| `GET` | `/datasets` | — | List all available datasets and schemas |
+| `GET` | `/dataset-stats/{dataset_id}` | — | Node and relationship statistics for dataset |
+| `GET` | `/investigate/{account_id}` | `dataset` (optional, default `demo_synthetic`) | Connected-account investigation signals |
+| `GET` | `/account-evidence/{account_id}` | `dataset` (optional, default `demo_synthetic`) | Detailed transaction evidence & amounts |
+| `GET` | `/graph/{account_id}?hops=2` | `hops` (1-3), `dataset` (optional) | Bounded subgraph neighborhood |
+| `GET` | `/clusters` | `dataset` (optional, default `demo_synthetic`) | Detect multi-account infrastructure clusters |
+| `POST` | `/ask` | `account_id`, `question`, `dataset` | Evidence-grounded assistant response |
+| `POST` | `/import-amlsim` | `dry_run` (boolean) | Execute or preview AMLSim dataset import |
+| `GET` | `/docs` | — | Interactive OpenAPI / Swagger documentation |
 
 ### Example Graph Request
 
 ```text
-GET /graph/ACC002?hops=3
+GET /graph/ACC002?hops=3&dataset=demo_synthetic
 ```
 
-Supported depths are 1, 2, and 3.
+Or for the IBM AMLSim dataset:
+
+```text
+GET /graph/AML_ACC_25?hops=2&dataset=ibm_amlsim
+```
 
 ### Example Assistant Request
 
 ```json
 {
-  "account_id": "ACC002",
-  "question": "Why is this account suspicious?"
+  "account_id": "AML_ACC_25",
+  "question": "What alerts and transactions are associated with this account?",
+  "dataset": "ibm_amlsim"
 }
 ```
 
-The assistant endpoint returns a structured response with the account, question, answer, evidence, and warning.
+The assistant endpoint returns a structured response with the account, question, grounded answer, specific evidence tokens, and responsible-use notices.
 
-For the exact request and response schemas, use the running API documentation at `/docs`.
+For interactive schema inspection, use the Swagger UI at [http://127.0.0.1:8010/docs](http://127.0.0.1:8010/docs).
 
 ---
 
 ## Testing
 
-Run the API smoke tests:
+### Run All Unit Tests (30 Tests)
+
+```powershell
+python -m unittest discover -s . -p "test_*.py" -v
+```
+
+### Run End-to-End API Smoke Tests (28 Checks)
 
 ```powershell
 python smoke_test.py
 ```
 
-Run the PDF exporter regression tests:
+### Run Dataset Isolation Verification
 
 ```powershell
-python -m unittest test_case_report -v
+python verify_amlsim_api.py
 ```
 
 ### Verified Development Results
 
-The current development environment has passed:
+The current development environment passes 100% of tests:
 
-| Test suite | Result |
-|---|---:|
-| API smoke checks | 28 passed |
-| PDF exporter regression tests | 5 passed |
-| Total checks across both suites | 33 passed |
+| Test suite | Purpose | Result |
+|---|---|---:|
+| API smoke checks (`smoke_test.py`) | Live HTTP endpoints across both datasets | 28 passed |
+| Case memory tests (`test_case_memory.py`) | Persistence & cross-session recall (Track 02) | 3 passed |
+| PDF case report tests (`test_case_report.py`) | Layout, tables, evidence & UTF-8 integrity | 5 passed |
+| Graph capabilities tests (`test_enhanced_features.py`) | Multi-hop paths, cluster detection, entity search | 9 passed |
+| AMLSim importer tests (`test_amlsim_importer.py`) | CSV ETL pipeline, schemas, dry-run & live import | 6 passed |
+| Dataset isolation tests (`test_dataset_isolation.py`) | Strict cross-dataset isolation & boundary checks | 7 passed |
+| **Total automated checks across all suites** | **Complete coverage across backend, data & UI** | **58 passed (0 failed)** |
 
-The smoke tests cover API availability, investigation responses, graph traversal, assistant output, and graph-depth validation.
-
-The PDF tests cover report generation, PDF signature, end marker, directory creation, and repeatability.
-
-These results validate the tested code paths. They do not establish real-world fraud detection accuracy or production readiness.
+The test suite validates graph traversal, multi-hop path finding, cluster detection, entity search, evidence traceability, UTF-8 encoding integrity, PDF generation, dataset isolation, and input boundary conditions.
 
 ---
 
