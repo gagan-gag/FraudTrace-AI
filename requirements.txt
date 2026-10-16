@@ -8,3 +8,4 @@ pandas
 networkx
 reportlab
 pydantic
+python-dotenv
