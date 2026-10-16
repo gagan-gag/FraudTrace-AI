@@ -37,6 +37,36 @@ The application uses the following architecture:
 4. **Investigation logic:** Collects connected-account signals and constructs evidence-based findings.
 5. **PDF report exporter:** Generates a case report from the available API responses.
 
+
+flowchart TD
+    U["Investigator"]
+    D["Streamlit Dashboard"]
+    API["FastAPI REST API"]
+    DB[("FalkorDB Graph Database")]
+    INV["Investigation Logic"]
+    RING["Connected-Account Signals"]
+    AI["Deterministic Investigation Assistant"]
+    PDF["PDF Case Report Exporter"]
+
+    U --> D
+    D --> API
+    API <--> DB
+    API --> INV
+    INV --> DB
+    D --> RING
+    D --> AI
+    AI --> API
+    D --> PDF
+    PDF --> API
+
+    classDef database fill:#dbeafe,stroke:#2563eb,color:#111827
+    classDef interface fill:#dcfce7,stroke:#16a34a,color:#111827
+    classDef logic fill:#f3e8ff,stroke:#9333ea,color:#111827
+
+    class DB database
+    class D,U interface
+    class INV,RING,AI,PDF logic
+
 ### Technology Stack
 
 | Component | Technology |
