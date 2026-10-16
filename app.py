@@ -18,7 +18,7 @@ app = FastAPI(
         "Uses synthetic demonstration data and persistent "
         "investigation memory."
     ),
-    version="0.6.0",
+    version="0.6.1",
 )
 
 
@@ -37,6 +37,11 @@ graph = db.select_graph("FraudTrace")
 class AskRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     question: str = Field(min_length=1, max_length=2000)
+    session_id: str = Field(
+        default="default",
+        min_length=1,
+        max_length=100,
+    )
 
 
 # ============================================================
@@ -49,7 +54,7 @@ def home():
         "project": "FraudTrace AI",
         "status": "running",
         "database": "FalkorDB",
-        "version": "0.6.0",
+        "version": "0.6.1",
         "endpoints": [
             "/",
             "/health",
@@ -250,7 +255,7 @@ def account_evidence(account_id: str):
     flagged_count = sum(
         1
         for item in transactions
-        if item.get("status") == "flagged"
+        if str(item.get("status", "")).lower() == "flagged"
     )
 
     return {
@@ -275,10 +280,7 @@ def get_account_graph(
     account_id: str,
     hops: int = Query(default=2, ge=1, le=3),
 ):
-    """
-    Return FalkorDB nodes and relationships reachable from an
-    account within the requested hop limit.
-    """
+    """Return graph nodes and relationships within the requested hop limit."""
 
     account_id = account_id.strip().upper()
 
@@ -349,7 +351,6 @@ def get_account_graph(
             }
 
         raw_nodes, raw_edges = result.result_set[0]
-
         nodes_by_id = {}
 
         for item in raw_nodes or []:
@@ -411,9 +412,7 @@ def get_account_graph(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Unable to retrieve the multi-hop graph from FalkorDB."
-            ),
+            detail="Unable to retrieve the multi-hop graph from FalkorDB.",
         ) from exc
 
 
@@ -432,10 +431,9 @@ def get_case_history(
     ),
 ):
     """
-    Retrieve recent historical investigation observations.
+    Retrieve historical investigation observations.
 
-    Memories provide context only. They are not independently verified
-    evidence and must not automatically affect risk assessments.
+    Memories are unverified context, not independently verified evidence.
     """
 
     account_id = account_id.strip().upper()
@@ -498,6 +496,7 @@ def get_case_history(
 def ask_investigation(request: AskRequest):
     account_id = request.account_id.strip().upper()
     question = request.question.strip()
+    session_id = request.session_id.strip()
 
     if not account_id or not question:
         raise HTTPException(
@@ -505,10 +504,17 @@ def ask_investigation(request: AskRequest):
             detail="Account ID and question cannot be blank.",
         )
 
+    if not session_id:
+        raise HTTPException(
+            status_code=422,
+            detail="Session ID cannot be blank.",
+        )
+
     try:
         result = investigate_question(
-            account_id,
-            question,
+            account_id=account_id,
+            question=question,
+            session_id=session_id,
         )
 
         if result is None:
@@ -524,7 +530,5 @@ def ask_investigation(request: AskRequest):
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "The investigation assistant could not complete the request."
-            ),
+            detail="The investigation assistant could not complete the request.",
         ) from exc

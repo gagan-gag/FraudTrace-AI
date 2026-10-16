@@ -8,11 +8,13 @@ Features:
 - Groq/OpenAI-compatible language model integration.
 - Bounded prompts to reduce HTTP 413 errors.
 - Session-specific investigation memory.
+- Stable evidence references generated from retrieved records.
 - Evidence-grounded answers and safe error handling.
 """
 
 import json
 import os
+import re
 from typing import Any
 
 import requests
@@ -49,7 +51,7 @@ MAX_RESPONSE_TOKENS = 700
 
 
 # ============================================================
-# SAFE SERIALIZATION
+# SAFE SERIALIZATION AND EVIDENCE REFERENCES
 # ============================================================
 
 def _json_safe(value: Any) -> Any:
@@ -70,13 +72,95 @@ def _json_safe(value: Any) -> Any:
 
 
 def _compact_json(value: Any) -> str:
-    """Serialize compactly to avoid unnecessary request bytes."""
+    """Serialize compactly to reduce request size."""
     return json.dumps(
         _json_safe(value),
         ensure_ascii=False,
         separators=(",", ":"),
         default=str,
     )
+
+
+def _reference_token(value: Any) -> str:
+    """Normalize an identifier into a safe, readable reference component."""
+    token = re.sub(r"[^A-Za-z0-9_-]+", "-", str(value or "UNKNOWN"))
+    return token.strip("-_")[:80] or "UNKNOWN"
+
+
+def _add_evidence_reference(
+    evidence_type: str,
+    item: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Attach a stable reference to a retrieved evidence record.
+
+    The reference is derived from the returned entity identifiers. It is
+    a traceability label, not a cryptographic proof or database record ID.
+    """
+    enriched = dict(item)
+
+    if evidence_type == "transaction":
+        transaction_id = enriched.get("transaction_id", "UNKNOWN")
+        reference = f"EV-TXN-{_reference_token(transaction_id)}"
+
+    elif evidence_type == "connected_account":
+        account_id = enriched.get("account_id", "UNKNOWN")
+        reference = f"EV-LINK-{_reference_token(account_id)}"
+
+    else:
+        entity_id = (
+            enriched.get("account_id")
+            or enriched.get("transaction_id")
+            or "UNKNOWN"
+        )
+        reference = f"EV-OTHER-{_reference_token(entity_id)}"
+
+    enriched["evidence_id"] = reference
+    return enriched
+
+
+def _build_evidence_reference_index(
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """
+    Create a compact index for the API and UI.
+
+    Index entries are built only from evidence actually retrieved.
+    """
+    reference_index = []
+
+    for item in evidence:
+        evidence_id = item.get("evidence_id")
+        if not evidence_id:
+            continue
+
+        entry = {
+            "evidence_id": evidence_id,
+            "type": item.get("type", "unknown"),
+            "source": item.get("source", "Unknown source"),
+        }
+
+        if item.get("type") == "transaction":
+            entry.update({
+                "transaction_id": item.get("transaction_id"),
+                "amount": item.get("amount"),
+                "status": item.get("status"),
+                "merchant_id": item.get("merchant_id"),
+            })
+
+        elif item.get("type") == "connected_account":
+            entry.update({
+                "account_id": item.get("account_id"),
+                "signals": item.get("signals", []),
+                "shared_devices": item.get("shared_devices", []),
+                "shared_ips": item.get("shared_ips", []),
+                "common_merchants": item.get("common_merchants", []),
+                "review_priority": item.get("review_priority", "UNKNOWN"),
+            })
+
+        reference_index.append(entry)
+
+    return reference_index
 
 
 # ============================================================
@@ -104,7 +188,7 @@ RISK_TERMS = (
 
 
 def plan_investigation(question: str) -> dict[str, Any]:
-    """Select graph evidence tools using simple question routing."""
+    """Select graph evidence tools using deterministic question routing."""
     normalized = " ".join(question.lower().split())
 
     asks_network = any(term in normalized for term in NETWORK_TERMS)
@@ -270,12 +354,18 @@ def _prepare_evidence(
     if len(evidence_text) <= MAX_EVIDENCE_CHARS:
         return evidence_text
 
-    # Preserve evidence structure by shortening lists before serialization.
+    # Shorten large lists while preserving the evidence structure.
     compact = dict(evidence_context)
 
     for key, value in list(compact.items()):
         if isinstance(value, list):
             compact[key] = value[:8]
+        elif isinstance(value, dict):
+            nested = dict(value)
+            for nested_key, nested_value in list(nested.items()):
+                if isinstance(nested_value, list):
+                    nested[nested_key] = nested_value[:8]
+            compact[key] = nested
 
     evidence_text = _compact_json(compact)
 
@@ -343,8 +433,17 @@ You are FraudTrace AI, a careful fraud-investigation analyst.
 
 Answer the user's actual question directly in clear language.
 Use current graph evidence as the source of facts about this dataset.
-Never invent account IDs, transactions, amounts, dates, or relationships.
-Perform calculations only from records supplied in the context.
+Never invent account IDs, transactions, amounts, dates, relationships,
+or evidence IDs. Perform calculations only from records supplied in
+the context.
+
+When making a specific factual claim supported by a supplied evidence
+record, cite its exact evidence_id in square brackets, for example
+[EV-TXN-TXN002]. Use only IDs present in the supplied evidence.
+If no supplied record supports a claim, do not attach a reference to it.
+Do not claim a reference proves fraud; it identifies the record supporting
+the observation.
+
 Distinguish observed facts from possible fraud indicators.
 A shared device, IP address, merchant, or flagged transaction is not proof
 of fraud. A review-priority label is not a calibrated fraud probability.
@@ -362,6 +461,7 @@ Return a concise, useful answer, not JSON.
 
     context = {
         "selected_account": account_id,
+        "session_id": session_id[:100],
         "question": question[:MAX_QUESTION_CHARS],
         "current_evidence": evidence_text,
         "recent_memories": memories,
@@ -376,7 +476,9 @@ Return a concise, useful answer, not JSON.
             : max(1000, MAX_CONTEXT_CHARS - 2500)
         ]
         context_text = _compact_json(context)
-        context_text = context_text[:MAX_CONTEXT_CHARS]
+
+        if len(context_text) > MAX_CONTEXT_CHARS:
+            context_text = context_text[:MAX_CONTEXT_CHARS]
 
     payload = {
         "model": model,
@@ -391,7 +493,8 @@ Return a concise, useful answer, not JSON.
                 "role": "user",
                 "content": (
                     "Answer the question using the evidence below. "
-                    "Do not invent omitted or missing evidence.\n\n"
+                    "Use only evidence IDs actually present in the "
+                    "provided records. Do not invent omitted facts.\n\n"
                     + context_text
                 ),
             },
@@ -498,6 +601,7 @@ def investigate_question(
             "question": question,
             "answer": "Please provide an account ID and a question.",
             "evidence": [],
+            "evidence_references": [],
             "warning": WARNING,
         }
 
@@ -523,6 +627,7 @@ def investigate_question(
                 "question": question,
                 "answer": f"Account {account_id} was not found in FalkorDB.",
                 "evidence": [],
+                "evidence_references": [],
                 "selected_tools": [],
                 "investigation_steps": [{
                     "step": "account_lookup",
@@ -568,9 +673,13 @@ def investigate_question(
                 })
 
                 for item in result.get("related_accounts", []):
+                    referenced_item = _add_evidence_reference(
+                        "connected_account",
+                        item,
+                    )
                     evidence.append({
                         "type": "connected_account",
-                        **item,
+                        **referenced_item,
                         "source": result["source"],
                     })
 
@@ -586,9 +695,13 @@ def investigate_question(
                 })
 
                 for item in result.get("transactions", []):
+                    referenced_item = _add_evidence_reference(
+                        "transaction",
+                        item,
+                    )
                     evidence.append({
                         "type": "transaction",
-                        **item,
+                        **referenced_item,
                         "source": result.get(
                             "source",
                             "FalkorDB transaction evidence",
@@ -602,10 +715,13 @@ def investigate_question(
             "transaction_evidence", {}
         )
 
+        evidence_references = _build_evidence_reference_index(evidence)
+
         evidence_context = {
             "stored_risk_label": risk_label,
             "connected_account_evidence": network,
             "transaction_evidence": transactions,
+            "evidence_references": evidence_references,
             "warning": WARNING,
         }
 
@@ -654,9 +770,11 @@ def investigate_question(
         response = {
             "account_id": account_id,
             "question": question,
+            "session_id": session_id,
             "answer": answer,
             "answer_method": answer_method,
             "evidence": evidence,
+            "evidence_references": evidence_references,
             "selected_tools": plan["selected_tools"],
             "intent": plan["intent"],
             "planning_method": plan["planning_method"],
@@ -688,8 +806,10 @@ def investigate_question(
         return {
             "account_id": account_id,
             "question": question,
+            "session_id": session_id,
             "answer": "The investigation could not be completed.",
             "evidence": evidence,
+            "evidence_references": _build_evidence_reference_index(evidence),
             "selected_tools": plan["selected_tools"],
             "intent": plan["intent"],
             "investigation_steps": steps,
