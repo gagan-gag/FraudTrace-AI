@@ -788,10 +788,235 @@ if data:
 
     st.divider()
 
-    # Investigation finding
+
+    # ============================================================
+    # INVESTIGATION FINDING — EVIDENCE-BACKED SUMMARY
+    # ============================================================
+
+    st.divider()
     st.subheader("Investigation Finding")
-    st.write(data.get("finding", "No finding available."))
-    st.warning(data.get("warning", ""))
+
+    finding_text = data.get("finding") or "No finding available."
+
+    warning_text = (
+        data.get("warning")
+        or (
+            "Connections are investigation leads, not proof of fraud. "
+            "Shared devices and IP addresses can have legitimate explanations."
+        )
+    )
+
+    # Reuse the connected-account analysis already performed above.
+    network_data_for_finding = (
+        network_data if "network_data" in locals() and network_data else {}
+    )
+
+    related_accounts_for_finding = (
+        network_data_for_finding.get("related_accounts") or []
+    )
+
+    # Index actual evidence by account ID.
+    related_by_id = {
+        str(item["account_id"]): item
+        for item in related_accounts_for_finding
+        if item.get("account_id")
+    }
+
+    investigation_related_ids = [
+        str(item)
+        for item in (data.get("related_accounts") or [])
+        if item
+    ]
+
+    network_related_ids = [
+        str(item["account_id"])
+        for item in related_accounts_for_finding
+        if item.get("account_id")
+    ]
+
+    related_ids = list(
+        dict.fromkeys(
+            investigation_related_ids + network_related_ids
+        )
+    )
+
+    # Derive priority only from values returned by the analysis.
+    priority_rank = {
+        "HIGH": 3,
+        "MEDIUM": 2,
+        "LOW": 1,
+    }
+
+    known_priorities = [
+        str(item.get("review_priority", "")).strip().upper()
+        for item in related_accounts_for_finding
+        if str(item.get("review_priority", "")).strip().upper()
+        in priority_rank
+    ]
+
+    highest_priority = (
+        max(known_priorities, key=lambda priority: priority_rank[priority])
+        if known_priorities
+        else None
+    )
+
+    # Finding and priority header.
+    finding_col, priority_col = st.columns([3, 1])
+
+    with finding_col:
+        st.markdown(f"**{finding_text}**")
+
+    with priority_col:
+        if highest_priority == "HIGH":
+            st.error("HIGH review priority")
+        elif highest_priority == "MEDIUM":
+            st.warning("MEDIUM review priority")
+        elif highest_priority == "LOW":
+            st.success("LOW review priority")
+        else:
+            st.caption("Priority unavailable")
+
+    # Summary metrics.
+    transaction_records = (
+        (transaction_data or {}).get("transactions") or []
+    )
+
+    flagged_count = (
+        (transaction_data or {}).get("flagged_transaction_count")
+    )
+
+    metric_col1, metric_col2, metric_col3 = st.columns(3)
+
+    metric_col1.metric(
+        "Related accounts",
+        len(related_ids),
+    )
+
+    metric_col2.metric(
+        "Shared devices",
+        len(data.get("shared_devices") or []),
+    )
+
+    metric_col3.metric(
+        "Flagged transactions",
+        (
+            flagged_count
+            if flagged_count is not None
+            else "Unavailable"
+        ),
+    )
+
+    # Account-by-account supporting evidence.
+    st.markdown("#### Connected-account evidence")
+
+    if related_ids:
+        for related_id in related_ids:
+            evidence_item = related_by_id.get(related_id, {})
+
+            priority_text = evidence_item.get(
+                "review_priority",
+                "Priority unavailable",
+            )
+
+            with st.expander(
+                f"{related_id} — {priority_text}",
+                expanded=False,
+            ):
+                signals = evidence_item.get("signals") or []
+                shared_devices = evidence_item.get("shared_devices") or []
+                shared_ips = evidence_item.get("shared_ips") or []
+                common_merchants = (
+                    evidence_item.get("common_merchants") or []
+                )
+
+                evidence_col1, evidence_col2 = st.columns(2)
+
+                with evidence_col1:
+                    st.markdown("**Relationship signals**")
+
+                    if signals:
+                        for signal in signals:
+                            st.write(f"- {signal}")
+                    else:
+                        st.write("No detailed signals returned.")
+
+                    st.markdown("**Shared devices**")
+
+                    if shared_devices:
+                        for device in shared_devices:
+                            st.write(f"- {device}")
+                    else:
+                        st.write("None returned for this account.")
+
+                with evidence_col2:
+                    st.markdown("**Shared IP addresses**")
+
+                    if shared_ips:
+                        for ip_address in shared_ips:
+                            st.write(f"- {ip_address}")
+                    else:
+                        st.write("None returned for this account.")
+
+                    st.markdown("**Common merchants**")
+
+                    if common_merchants:
+                        for merchant in common_merchants:
+                            st.write(f"- {merchant}")
+                    else:
+                        st.write("None returned for this account.")
+
+                additional_evidence = evidence_item.get("evidence") or []
+
+                if additional_evidence:
+                    st.markdown("**Additional evidence**")
+
+                    for entry in additional_evidence:
+                        st.write(f"- {entry}")
+
+    else:
+        st.info(
+            "No related accounts were returned by the available checks."
+        )
+
+    # Transaction details from the account-evidence API response.
+    st.markdown("#### Transaction evidence")
+
+    if transaction_records:
+        expected_columns = [
+            "transaction_id",
+            "amount",
+            "status",
+            "merchant_id",
+        ]
+
+        display_columns = [
+            column
+            for column in expected_columns
+            if any(column in record for record in transaction_records)
+        ]
+
+        if display_columns:
+            st.dataframe(
+                pd.DataFrame(transaction_records)[display_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+        else:
+            st.info(
+                "Transaction records were returned, but their fields "
+                "do not match the expected display columns."
+            )
+    else:
+        st.info("No transaction records are available for this account.")
+
+    # Explicit caution and interpretation limits.
+    st.warning(warning_text)
+
+    st.caption(
+        "Review priority is a heuristic, not a calibrated fraud probability. "
+        "Verify each signal against the underlying graph and transaction data."
+    )
+
 
     # Exportable case report
     st.divider()

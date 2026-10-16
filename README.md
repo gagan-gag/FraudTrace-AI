@@ -9,7 +9,7 @@ Instead of examining transactions in isolation, FraudTrace AI uses **FalkorDB** 
 
 Investigators can explore graph neighborhoods at different depths, review supporting evidence, receive deterministic investigation summaries, and export PDF reports.
 
-> **Important:** This project currently uses synthetic demonstration data. Investigation findings are leads for human review, not proof of fraud. The current investigation assistant uses deterministic reasoning and graph evidence; it does not use a large language model.
+> **Important:** This project uses synthetic demonstration data. Investigation findings are leads for human review, not proof of fraud. The assistant retrieves graph evidence and uses deterministic question routing, with optional Groq/OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the supporting evidence.
 
 ---
 
@@ -90,7 +90,7 @@ Retrieves transaction details, merchant associations, amounts, and transaction s
 
 Provides a Streamlit interface for selecting accounts, exploring evidence, viewing graph relationships, and interacting with the investigation assistant.
 
-### 6. Deterministic investigation assistant
+### 6. Evidence-grounded investigation assistant
 
 Produces structured investigation summaries using available graph evidence and predefined reasoning logic.
 
@@ -495,7 +495,7 @@ FraudTrace AI is an investigation-support demonstration.
 - **No conclusive fraud determination:** A flagged transaction is a review signal, not proof of fraud.
 - **Shared infrastructure:** Legitimate accounts may share devices, networks, and merchants.
 - **Heuristic priorities:** Review priorities are not calibrated fraud probabilities.
-- **Deterministic assistant:** The current assistant uses graph evidence and deterministic reasoning; it does not yet use a large language model.
+- **Evidence-grounded assistant:** The assistant uses deterministic question routing and retrieved graph evidence, with optional Groq/OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the returned evidence references.
 - **No claimed real-world accuracy:** No real-world precision, recall, false-positive rate, or financial-loss reduction claim is made.
 - **Human oversight:** Investigators should verify source records, consider alternative explanations, and follow appropriate review procedures.
 
@@ -552,6 +552,12 @@ Potential future work includes:
 - Evaluation using representative, appropriately governed data before making performance claims.
 
 These are proposed improvements, not claims about features already implemented.
+
+---
+
+## AI-Assisted Development Disclosure
+
+AI coding assistance was used during development to help review code, improve documentation, troubleshoot issues, and refine implementation details. The project was tested locally using Python compilation, unit tests, and API smoke tests. The project author is responsible for understanding, validating, and explaining the submitted implementation, graph model, queries, and technical decisions.
 
 ---
 
