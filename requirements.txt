@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+falkordb
+streamlit
+plotly
+requests
+pandas
+networkx
+reportlab
+pydantic
