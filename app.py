@@ -1,7 +1,5 @@
-
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
-from falkordb import FalkorDB
 
 from dataset_registry import (
     validate_dataset_id,
@@ -10,11 +8,14 @@ from dataset_registry import (
     get_dataset_metadata,
     list_datasets,
 )
+
 from ai_assistant import (
     investigate_question,
     get_transaction_evidence,
 )
+
 from case_memory import get_recent_investigation_memories
+
 from ring_detection import (
     find_graph_paths,
     detect_suspicious_clusters,
@@ -31,19 +32,12 @@ app = FastAPI(
     title="FraudTrace AI",
     description=(
         "Graph-powered fraud investigation using FalkorDB. "
-        "Supports multiple isolated datasets (FraudTrace synthetic demo & IBM AMLSim) "
+        "Supports multiple isolated datasets "
+        "(FraudTrace synthetic demo & IBM AMLSim) "
         "and persistent investigation memory."
     ),
     version="0.7.0",
 )
-
-
-# ============================================================
-# FALKORDB CONNECTION
-# ============================================================
-
-db = FalkorDB(host="localhost", port=6379)
-graph = db.select_graph("FraudTrace")
 
 
 # ============================================================
@@ -53,11 +47,13 @@ graph = db.select_graph("FraudTrace")
 class AskRequest(BaseModel):
     account_id: str = Field(min_length=1, max_length=100)
     question: str = Field(min_length=1, max_length=2000)
+
     session_id: str = Field(
         default="default",
         min_length=1,
         max_length=100,
     )
+
     dataset_id: str = Field(
         default="demo_synthetic",
         min_length=1,
@@ -98,16 +94,19 @@ def home():
 @app.get("/health")
 def health():
     try:
-        db.connection.ping()
+        demo_graph = get_graph("demo_synthetic")
+        demo_graph.query("RETURN 1")
+
         return {
             "status": "healthy",
             "database": "FalkorDB",
             "graphs": ["FraudTrace", "ibm_amlsim"],
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="FalkorDB is not reachable.",
+            detail=f"FalkorDB is not reachable: {exc}",
         ) from exc
 
 
@@ -117,12 +116,13 @@ def health():
 
 @app.get("/datasets")
 def get_datasets():
-    """List all available datasets with metadata and node/relationship statistics."""
+    """List available datasets and their metadata."""
     try:
         return {
             "datasets": list_datasets(),
             "default_dataset": "demo_synthetic",
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -132,12 +132,14 @@ def get_datasets():
 
 @app.get("/dataset-stats/{dataset_id}")
 def get_stats_for_dataset(dataset_id: str):
-    """Retrieve detailed statistics for a specific dataset."""
+    """Retrieve statistics for a specific dataset."""
     try:
         valid_id = validate_dataset_id(dataset_id)
         return get_graph_stats(valid_id)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -146,11 +148,15 @@ def get_stats_for_dataset(dataset_id: str):
 
 
 @app.post("/import-amlsim")
-def import_amlsim_dataset(dry_run: bool = Query(default=False)):
-    """Trigger the IBM AMLSim CSV import pipeline (dry-run or live)."""
+def import_amlsim_dataset(
+    dry_run: bool = Query(default=False),
+):
+    """Trigger the IBM AMLSim CSV import pipeline."""
     try:
         from amlsim_importer import run_import
+
         stats = run_import(dry_run=dry_run)
+
         return {
             "status": "success",
             "dry_run": dry_run,
@@ -165,6 +171,7 @@ def import_amlsim_dataset(dry_run: bool = Query(default=False)):
                 "total_rejected": stats.total_rejected,
             },
         }
+
     except Exception as exc:
         raise HTTPException(
             status_code=500,
@@ -183,6 +190,7 @@ def investigate(
 ):
     try:
         dataset_id = validate_dataset_id(dataset)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -231,7 +239,10 @@ def investigate(
             if not direct_result.result_set:
                 raise HTTPException(
                     status_code=404,
-                    detail=f"Account {account_id} was not found in dataset '{dataset_id}'.",
+                    detail=(
+                        f"Account {account_id} was not found "
+                        f"in dataset '{dataset_id}'."
+                    ),
                 )
 
             row = direct_result.result_set[0]
@@ -243,6 +254,7 @@ def investigate(
 
         except HTTPException:
             raise
+
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
@@ -250,8 +262,10 @@ def investigate(
             ) from exc
 
         paths = []
+
         for path_row in path_result.result_set:
             start, device, intermediary, shared_ip, connected = path_row
+
             paths.append({
                 "start_account": start,
                 "shared_device": device,
@@ -298,14 +312,25 @@ def investigate(
         }
 
     elif dataset_id == "ibm_amlsim":
-        conn_result = detect_connected_accounts(account_id, dataset_id="ibm_amlsim")
+        conn_result = detect_connected_accounts(
+            account_id,
+            dataset_id="ibm_amlsim",
+        )
+
         if conn_result is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"Account {account_id} was not found in IBM AMLSim dataset.",
+                detail=(
+                    f"Account {account_id} was not found "
+                    "in IBM AMLSim dataset."
+                ),
             )
 
-        related = [r["account_id"] for r in conn_result.get("related_accounts", [])]
+        related = [
+            r["account_id"]
+            for r in conn_result.get("related_accounts", [])
+        ]
+
         return {
             "account_id": account_id,
             "dataset_id": dataset_id,
@@ -315,7 +340,9 @@ def investigate(
             "multi_hop_paths": [],
             "multi_hop_path_count": 0,
             "finding": (
-                f"IBM AMLSim account with {conn_result['related_account_count']} counterparty connection(s)."
+                f"IBM AMLSim account with "
+                f"{conn_result['related_account_count']} "
+                "counterparty connection(s)."
                 if related
                 else "No counterparty or alert connections found."
             ),
@@ -335,20 +362,29 @@ def account_evidence(
 ):
     try:
         dataset_id = validate_dataset_id(dataset)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     account_id = account_id.strip().upper()
 
     try:
-        ev = get_transaction_evidence(account_id, dataset_id=dataset_id)
+        ev = get_transaction_evidence(
+            account_id,
+            dataset_id=dataset_id,
+        )
+
         if not ev["found"]:
             raise HTTPException(
                 status_code=404,
-                detail=f"Account {account_id} was not found in dataset '{dataset_id}'.",
+                detail=(
+                    f"Account {account_id} was not found "
+                    f"in dataset '{dataset_id}'."
+                ),
             )
 
         meta = get_dataset_metadata(dataset_id)
+
         return {
             "account_id": ev["account_id"],
             "dataset_id": dataset_id,
@@ -359,8 +395,10 @@ def account_evidence(
             "source": ev.get("source"),
             "warning": meta.get("disclaimer", ""),
         }
+
     except HTTPException:
         raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -378,15 +416,21 @@ def get_account_graph(
     hops: int = Query(default=2, ge=1, le=3),
     dataset: str = Query(default="demo_synthetic"),
 ):
-    """Return graph nodes and relationships within the requested hop limit."""
+    """Return graph nodes and relationships within the hop limit."""
     try:
         dataset_id = validate_dataset_id(dataset)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
     account_id = account_id.strip().upper()
     target_graph = get_graph(dataset_id)
-    acc_label = "AMLAccount" if dataset_id == "ibm_amlsim" else "Account"
+
+    acc_label = (
+        "AMLAccount"
+        if dataset_id == "ibm_amlsim"
+        else "Account"
+    )
 
     try:
         check = target_graph.query(
@@ -397,7 +441,10 @@ def get_account_graph(
         if not check.result_set:
             raise HTTPException(
                 status_code=404,
-                detail=f"Account {account_id} was not found in dataset '{dataset_id}'.",
+                detail=(
+                    f"Account {account_id} was not found "
+                    f"in dataset '{dataset_id}'."
+                ),
             )
 
         query = f"""
@@ -449,7 +496,9 @@ def get_account_graph(
                 "edges": [],
                 "node_count": 1,
                 "edge_count": 0,
-                "source": f"FalkorDB stored relationships ({dataset_id})",
+                "source": (
+                    f"FalkorDB stored relationships ({dataset_id})"
+                ),
             }
 
         raw_nodes, raw_edges = result.result_set[0]
@@ -460,6 +509,7 @@ def get_account_graph(
                 continue
 
             node_id = item.get("id")
+
             if not node_id:
                 continue
 
@@ -507,15 +557,21 @@ def get_account_graph(
             "edges": edges,
             "node_count": len(nodes_by_id),
             "edge_count": len(edges),
-            "source": f"FalkorDB stored relationships ({dataset_id})",
+            "source": (
+                f"FalkorDB stored relationships ({dataset_id})"
+            ),
         }
 
     except HTTPException:
         raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"Unable to retrieve the multi-hop graph from FalkorDB: {exc}",
+            detail=(
+                "Unable to retrieve the multi-hop graph "
+                f"from FalkorDB: {exc}"
+            ),
         ) from exc
 
 
@@ -534,9 +590,10 @@ def get_case_history(
     ),
     dataset: str = Query(default="demo_synthetic"),
 ):
-    """Retrieve historical investigation observations for an account."""
+    """Retrieve historical investigation observations."""
     try:
         dataset_id = validate_dataset_id(dataset)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -544,6 +601,7 @@ def get_case_history(
 
     if session_id is not None:
         session_id = session_id.strip()
+
         if not session_id:
             raise HTTPException(
                 status_code=422,
@@ -561,7 +619,10 @@ def get_case_history(
         if not isinstance(result, dict):
             raise HTTPException(
                 status_code=503,
-                detail="The case-history service returned an invalid response.",
+                detail=(
+                    "The case-history service returned "
+                    "an invalid response."
+                ),
             )
 
         return {
@@ -575,20 +636,25 @@ def get_case_history(
 
     except HTTPException:
         raise
+
     except LookupError as exc:
         raise HTTPException(
             status_code=404,
             detail=str(exc),
         ) from exc
+
     except ValueError as exc:
         raise HTTPException(
             status_code=422,
             detail=str(exc),
         ) from exc
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"Unable to retrieve case history from FalkorDB: {exc}",
+            detail=(
+                f"Unable to retrieve case history from FalkorDB: {exc}"
+            ),
         ) from exc
 
 
@@ -604,6 +670,7 @@ def ask_investigation(request: AskRequest):
 
     try:
         dataset_id = validate_dataset_id(request.dataset_id)
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -637,10 +704,14 @@ def ask_investigation(request: AskRequest):
 
     except HTTPException:
         raise
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail=f"The investigation assistant could not complete the request: {exc}",
+            detail=(
+                "The investigation assistant could not complete "
+                f"the request: {exc}"
+            ),
         ) from exc
 
 
@@ -655,17 +726,20 @@ def get_graph_paths(
     hops: int = Query(default=4, ge=1, le=6),
     dataset: str = Query(default="demo_synthetic"),
 ):
-    """Discover real graph paths between any two entities in FalkorDB."""
+    """Discover graph paths between two entities."""
     try:
         dataset_id = validate_dataset_id(dataset)
+
         return find_graph_paths(
             source_id=source,
             target_id=target,
             max_hops=hops,
             dataset_id=dataset_id,
         )
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -674,20 +748,29 @@ def get_graph_paths(
 
 
 @app.get("/clusters")
-def get_clusters(dataset: str = Query(default="demo_synthetic")):
+def get_clusters(
+    dataset: str = Query(default="demo_synthetic"),
+):
     """Discover connected account rings and suspicious clusters."""
     try:
         dataset_id = validate_dataset_id(dataset)
-        clusters = detect_suspicious_clusters(dataset_id=dataset_id)
+
+        clusters = detect_suspicious_clusters(
+            dataset_id=dataset_id,
+        )
+
         meta = get_dataset_metadata(dataset_id)
+
         return {
             "dataset_id": dataset_id,
             "cluster_count": len(clusters),
             "clusters": clusters,
             "warning": meta.get("disclaimer", ""),
         }
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
@@ -704,19 +787,23 @@ def search_entities(
     """Search graph entities by ID substring."""
     try:
         dataset_id = validate_dataset_id(dataset)
+
         results = search_graph_entities(
             query_text=q,
             limit=limit,
             dataset_id=dataset_id,
         )
+
         return {
             "dataset_id": dataset_id,
             "query": q,
             "count": len(results),
             "results": results,
         }
+
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
     except Exception as exc:
         raise HTTPException(
             status_code=503,
