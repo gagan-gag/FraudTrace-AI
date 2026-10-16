@@ -12,16 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from falkordb import FalkorDB
 from dataset_registry import get_graph, validate_dataset_id
-
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-db = FalkorDB(host="localhost", port=6379)
-graph = db.select_graph("FraudTrace")
 
 MAX_EVIDENCE_ITEMS = 100
 MAX_QUESTION_LENGTH = 2000
