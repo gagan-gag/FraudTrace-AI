@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import requests
-from falkordb import FalkorDB
 
 from dataset_registry import get_graph, validate_dataset_id, get_dataset_metadata
 from ring_detection import detect_connected_accounts
@@ -31,14 +30,6 @@ from case_memory import (
     save_investigation_memory,
     get_recent_investigation_memories,
 )
-
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-db = FalkorDB(host="localhost", port=6379)
-graph = db.select_graph("FraudTrace")
 
 WARNING = (
     "FraudTrace AI uses synthetic demonstration data. Shared devices, "
