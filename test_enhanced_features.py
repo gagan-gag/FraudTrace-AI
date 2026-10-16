@@ -13,8 +13,9 @@ Validates:
 """
 
 import unittest
-from falkordb import FalkorDB
+import uuid
 
+from dataset_registry import get_graph
 from ring_detection import (
     detect_connected_accounts,
     find_graph_paths,
@@ -27,8 +28,7 @@ from ai_assistant import investigate_question, plan_investigation
 class EnhancedFeaturesTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.db = FalkorDB(host="localhost", port=6379)
-        cls.graph = cls.db.select_graph("FraudTrace")
+        cls.graph = get_graph("demo_synthetic")
 
     def test_shared_device_and_ip_detection(self):
         """Verify ACC002 shares DEV001/IP001 with ACC001 and DEV002/IP002 with ACC003/ACC006."""
@@ -106,19 +106,33 @@ class EnhancedFeaturesTests(unittest.TestCase):
 
     def test_evidence_reference_integrity(self):
         """Verify assistant generates traceable EV-LINK and EV-TXN references."""
-        res = investigate_question(
-            account_id="ACC002",
-            question="Which accounts share devices and transactions with ACC002?",
-            session_id="test-evidence-integrity",
-        )
-        self.assertEqual(res["account_id"], "ACC002")
-        evidence = res.get("evidence", [])
-        self.assertGreater(len(evidence), 0)
+        session_id = f"test-evidence-integrity-{uuid.uuid4().hex}"
+        try:
+            res = investigate_question(
+                account_id="ACC002",
+                question="Which accounts share devices and transactions with ACC002?",
+                session_id=session_id,
+            )
+            self.assertEqual(res["account_id"], "ACC002")
+            evidence = res.get("evidence", [])
+            self.assertGreater(len(evidence), 0)
 
-        for ev in evidence:
-            ev_id = ev.get("evidence_id")
-            self.assertIsNotNone(ev_id)
-            self.assertTrue(ev_id.startswith("EV-LINK-") or ev_id.startswith("EV-TXN-") or ev_id.startswith("EV-OTHER-"))
+            for ev in evidence:
+                ev_id = ev.get("evidence_id")
+                self.assertIsNotNone(ev_id)
+                self.assertTrue(
+                    ev_id.startswith("EV-LINK-")
+                    or ev_id.startswith("EV-TXN-")
+                    or ev_id.startswith("EV-OTHER-")
+                )
+        finally:
+            self.graph.query(
+                """
+                MATCH (m:InvestigationMemory {session_id: $session_id})
+                DETACH DELETE m
+                """,
+                params={"session_id": session_id},
+            )
 
     def test_utf8_currency_and_punctuation_integrity(self):
         """Verify Indian Rupee (₹) and em-dash (—) are preserved in UTF-8 without corruption."""

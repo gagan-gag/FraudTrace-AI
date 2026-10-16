@@ -104,10 +104,15 @@ def _add_evidence_reference(
         account_id = enriched.get("account_id", "UNKNOWN")
         reference = f"EV-LINK-{_reference_token(account_id)}"
 
+    elif evidence_type == "alert":
+        alert_id = enriched.get("alert_id", "UNKNOWN")
+        reference = f"EV-ALERT-{_reference_token(alert_id)}"
+
     else:
         entity_id = (
             enriched.get("account_id")
             or enriched.get("transaction_id")
+            or enriched.get("alert_id")
             or "UNKNOWN"
         )
         reference = f"EV-OTHER-{_reference_token(entity_id)}"
@@ -138,6 +143,12 @@ def _build_evidence_reference_index(
                 "transaction_id": item.get("transaction_id"),
                 "amount": item.get("amount"),
                 "status": item.get("status"),
+            })
+        elif item.get("type") == "alert":
+            entry.update({
+                "alert_id": item.get("alert_id"),
+                "check_name": item.get("check_name"),
+                "event_date": item.get("event_date"),
                 "merchant_id": item.get("merchant_id"),
                 "direction": item.get("direction"),
                 "counterparty": item.get("counterparty"),
@@ -256,6 +267,8 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 "transactions": [],
                 "transaction_count": 0,
                 "flagged_transaction_count": 0,
+                "alerts": [],
+                "alert_count": 0,
             }
 
         row = result.result_set[0]
@@ -290,7 +303,11 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 status: CASE WHEN a.is_fraud OR (cp_out IS NOT NULL AND cp_out.is_fraud) THEN 'flagged' ELSE 'normal' END,
                 direction: 'sent',
                 counterparty: cp_out.id,
-                source_type: tx_out.source_type
+                source_type: tx_out.source_type,
+                tx_count: tx_out.tx_count,
+                branch_id: tx_out.branch_id,
+                cash_transaction: tx_out.cash_transaction,
+                source_file: tx_out.source_file
             }) AS sent_txns
             OPTIONAL MATCH (a)<-[:AML_RECEIVED]-(tx_in:AMLTransaction)
             OPTIONAL MATCH (cp_in:AMLAccount)-[:AML_SENT]->(tx_in)
@@ -300,7 +317,11 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 status: CASE WHEN cp_in.is_fraud OR a.is_fraud THEN 'flagged' ELSE 'normal' END,
                 direction: 'received',
                 counterparty: cp_in.id,
-                source_type: tx_in.source_type
+                source_type: tx_in.source_type,
+                tx_count: tx_in.tx_count,
+                branch_id: tx_in.branch_id,
+                cash_transaction: tx_in.cash_transaction,
+                source_file: tx_in.source_file
             }) AS recv_txns
             RETURN a.id, a.is_fraud, a.suspicious, sent_txns, recv_txns
         """
@@ -313,6 +334,8 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 "transactions": [],
                 "transaction_count": 0,
                 "flagged_transaction_count": 0,
+                "alerts": [],
+                "alert_count": 0,
             }
 
         row = result.result_set[0]
@@ -330,6 +353,38 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
             if item and item.get("transaction_id") is not None:
                 all_txns.append(item)
 
+        alert_result = target_graph.query(
+            """
+            MATCH (a:AMLAccount {id: $account_id})-[:HAS_ALERT]->(al:AMLAlert)
+            RETURN
+                al.id AS alert_id,
+                al.source_alert_key AS source_alert_key,
+                al.alert_text AS alert_text,
+                al.customer_id AS customer_id,
+                al.check_name AS check_name,
+                al.pattern AS pattern,
+                al.event_date AS event_date,
+                al.organization_type AS organization_type,
+                al.escalated AS escalated
+            ORDER BY al.event_date, al.id
+            """,
+            params={"account_id": account_id},
+        )
+        alerts = [
+            {
+                "alert_id": alert[0],
+                "source_alert_key": alert[1],
+                "alert_text": alert[2],
+                "customer_id": alert[3],
+                "check_name": alert[4],
+                "pattern": alert[5],
+                "event_date": alert[6],
+                "organization_type": alert[7],
+                "escalated": bool(alert[8]),
+            }
+            for alert in alert_result.result_set
+        ]
+
         return {
             "found": True,
             "account_id": acc_id,
@@ -340,7 +395,12 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 1 for item in all_txns
                 if str(item.get("status", "")).lower() == "flagged"
             ),
-            "source": "IBM AMLSim transaction graph (AML_SENT / AML_RECEIVED)",
+            "alerts": alerts,
+            "alert_count": len(alerts),
+            "source": (
+                "IBM AMLSim transaction and alert graph "
+                "(AML_SENT / AML_RECEIVED / HAS_ALERT)"
+            ),
         }
 
 
@@ -510,6 +570,7 @@ def _answer_with_llm(
         tx_ev = evidence_context.get("transaction_evidence") or {}
         related = conn_ev.get("related_accounts") or []
         txns = tx_ev.get("transactions") or []
+        alerts = tx_ev.get("alerts") or []
 
         if dataset_id == "ibm_amlsim":
             summary_lines = [
@@ -540,8 +601,20 @@ def _answer_with_llm(
                         f"counterparty {cp} [EV-TXN-{t.get('transaction_id')}]"
                     )
 
+            if alerts:
+                summary_lines.append(f"- Alerts linked to this account: {len(alerts)}.")
+                for alert in alerts:
+                    summary_lines.append(
+                        f"  • {alert.get('alert_id')} "
+                        f"(check: {alert.get('check_name') or 'unknown'}, "
+                        f"date: {alert.get('event_date') or 'unknown'}, "
+                        f"escalated: {bool(alert.get('escalated'))}) "
+                        f"[EV-ALERT-{alert.get('alert_id')}]"
+                    )
+
             summary_lines.append(
-                "\nNote: IBM AMLSim schema contains Account, Transaction, and Alert entities only. "
+                "\nNote: IBM AMLSim is simulation data; its labels are not "
+                "confirmed findings. Branches represent cash-transaction locations. "
                 "Device and IP address entities are not present in this dataset."
             )
             return "\n".join(summary_lines), "graph_evidence_summary"
@@ -938,6 +1011,17 @@ def investigate_question(
                         ),
                     })
 
+                for item in result.get("alerts", []):
+                    referenced_item = _add_evidence_reference("alert", item)
+                    evidence.append({
+                        "type": "alert",
+                        **referenced_item,
+                        "source": result.get(
+                            "source",
+                            "IBM AMLSim alert relationship",
+                        ),
+                    })
+
         network = tool_results.get(
             "connected_account_signals", {}
         )
@@ -1022,6 +1106,7 @@ def investigate_question(
                 "flagged_transaction_count": transactions.get(
                     "flagged_transaction_count", 0
                 ),
+                "alert_count": transactions.get("alert_count", 0),
                 "stored_risk_label": risk_label,
             },
             "memory_saved": memory_saved,

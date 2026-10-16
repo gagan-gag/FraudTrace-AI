@@ -20,9 +20,13 @@ Database configuration:
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
 from falkordb import FalkorDB
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 # ============================================================
@@ -93,17 +97,20 @@ DATASET_METADATA: dict[str, dict[str, Any]] = {
         "graph_name": "ibm_amlsim",
         "description": (
             "Synthetic anti-money-laundering simulation data from IBM AMLSim. "
-            "Contains accounts, transactions, and suspicious-activity alerts. "
+            "Contains accounts, account transfers, cash transactions, "
+            "branches, and suspicious-activity alerts. "
             "No device or IP address relationships are present in this dataset."
         ),
         "node_labels": [
             "AMLAccount",
             "AMLTransaction",
             "AMLAlert",
+            "AMLBranch",
         ],
         "relationship_types": [
             "AML_SENT",
             "AML_RECEIVED",
+            "AML_AT_BRANCH",
             "HAS_ALERT",
             "HAS_INVESTIGATION_MEMORY",
         ],
@@ -270,6 +277,7 @@ def get_graph_stats(dataset_id: str | None = None) -> dict[str, Any]:
         "total_relationships": 0,
         "node_counts": {},
         "relationship_counts": {},
+        "is_empty": True,
         "has_device_ip": metadata["has_device_ip"],
         "has_merchant": metadata["has_merchant"],
         "has_alerts": metadata["has_alerts"],
@@ -315,8 +323,14 @@ def get_graph_stats(dataset_id: str | None = None) -> dict[str, Any]:
                 "total_relationships": total_relationships,
                 "node_counts": node_counts,
                 "relationship_counts": relationship_counts,
+                "is_empty": total_nodes == 0 and total_relationships == 0,
             }
         )
+
+        if base_result["is_empty"]:
+            base_result["diagnostic"] = (
+                f"Dataset '{validated_id}' is connected but currently empty."
+            )
 
         return base_result
 

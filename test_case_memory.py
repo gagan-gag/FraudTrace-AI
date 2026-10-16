@@ -5,7 +5,7 @@ import json
 import uuid
 import unittest
 
-from falkordb import FalkorDB
+from dataset_registry import get_graph
 from case_memory import (
     save_investigation_memory,
     get_recent_investigation_memories,
@@ -15,8 +15,7 @@ from case_memory import (
 class CaseMemoryIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.db = FalkorDB(host="localhost", port=6379)
-        cls.graph = cls.db.select_graph("FraudTrace")
+        cls.graph = get_graph("demo_synthetic")
 
         account_check = cls.graph.query(
             "MATCH (a:Account {id: $account_id}) RETURN a.id",

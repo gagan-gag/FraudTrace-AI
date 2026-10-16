@@ -33,12 +33,6 @@ import plotly.graph_objects as go
 import requests
 import streamlit as st
 
-from ring_detection import (
-    detect_connected_accounts,
-    find_graph_paths,
-    detect_suspicious_clusters,
-    search_graph_entities,
-)
 from export_case_report import build_report, get_json, post_json
 
 # ============================================================
@@ -50,7 +44,7 @@ import os
 
 API_URL = os.getenv(
     "API_BASE_URL",
-    "http://127.0.0.1:8010"
+    "http://127.0.0.1:8010",
 ).rstrip("/")
 
 
@@ -268,20 +262,61 @@ st.markdown(LIGHT_THEME_CSS, unsafe_allow_html=True)
 # API HELPERS
 # ============================================================
 
-def api_get(path: str, params: dict | None = None) -> dict:
-    """Safe GET from FastAPI with explicit UTF-8 decoding."""
-    response = requests.get(f"{API_URL}{path}", params=params, timeout=20)
+def _api_request(
+    method: str,
+    path: str,
+    params: dict | None = None,
+    payload: dict | None = None,
+) -> dict:
+    """Request a JSON object from the API and report actionable errors."""
+    url = f"{API_URL}{path}"
+    try:
+        response = requests.request(
+            method,
+            url,
+            params=params,
+            json=payload,
+            timeout=60 if method == "POST" else 20,
+        )
+    except requests.Timeout as exc:
+        raise RuntimeError(
+            f"The FraudTrace API request to {path} timed out. "
+            "Check the backend and try again."
+        ) from exc
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Could not reach the FraudTrace API at {API_URL}: {exc}"
+        ) from exc
+
     response.encoding = "utf-8"
-    response.raise_for_status()
-    return response.json()
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f"The FraudTrace API returned invalid JSON "
+            f"(HTTP {response.status_code}) for {path}."
+        ) from exc
+
+    if not response.ok:
+        detail = result.get("detail", result) if isinstance(result, dict) else result
+        raise RuntimeError(
+            f"FraudTrace API {path} returned HTTP {response.status_code}: "
+            f"{detail}"
+        )
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            f"The FraudTrace API returned {type(result).__name__}, "
+            f"not a JSON object, for {path}."
+        )
+    return result
+
+
+def api_get(path: str, params: dict | None = None) -> dict:
+    return _api_request("GET", path, params=params)
 
 
 def api_post(path: str, payload: dict) -> dict:
-    """Safe POST to FastAPI with explicit UTF-8 decoding."""
-    response = requests.post(f"{API_URL}{path}", json=payload, timeout=60)
-    response.encoding = "utf-8"
-    response.raise_for_status()
-    return response.json()
+    return _api_request("POST", path, payload=payload)
 
 
 def create_case_report_pdf(account_id: str, hops: int = 3, dataset_id: str = "demo_synthetic") -> bytes:
@@ -337,6 +372,7 @@ NODE_COLORS = {
     "Transaction": "#F97316",    # Bright Orange
     "AMLTransaction": "#F97316", # Bright Orange
     "AMLAlert": "#DC2626",       # Crimson Red
+    "AMLBranch": "#64748B",       # Slate
     "Device": "#8B5CF6",         # Amethyst Purple
     "IPAddress": "#10B981",      # Emerald Green
     "Merchant": "#F43F5E",       # Coral Rose
@@ -350,6 +386,7 @@ EDGE_COLORS = {
     "CONNECTS_FROM": "#10B981",  # Green
     "AML_SENT": "#2563EB",       # Blue
     "AML_RECEIVED": "#10B981",   # Green
+    "AML_AT_BRANCH": "#64748B",  # Slate
     "HAS_ALERT": "#DC2626",      # Red
     "CONNECTED": "#94A3B8",      # Gray
 }
@@ -367,6 +404,7 @@ def build_filtered_subgraph(
 
     type_to_filter = {
         "Transaction": "show_txns",
+        "AMLTransaction": "show_txns",
         "Device": "show_devices",
         "IPAddress": "show_ips",
         "Merchant": "show_merchants",
@@ -818,22 +856,55 @@ with nav_col3:
         label_visibility="collapsed",
         key="nav_search_input",
     )
-    if search_query:
-        found_entities = search_graph_entities(search_query, dataset_id=st.session_state.dataset_id)
-        if found_entities:
-            with st.expander(f"Search Results ({len(found_entities)})", expanded=True):
-                for item in found_entities:
-                    e_id = item["id"]
-                    e_type = item["type"]
-                    if st.button(f"{e_id} ({e_type})", key=f"search_btn_{e_id}"):
-                        if e_type in ("Account", "AMLAccount"):
-                            st.session_state.current_account = e_id
-                        st.session_state.selected_entity_id = e_id
-                        st.rerun()
-        else:
-            st.caption(f"No matching entities in dataset '{st.session_state.dataset_id}'.")
 
-st.markdown("<hr style='margin:4px 0 16px 0; border:none; border-bottom:1px solid #E2E8F0;'>", unsafe_allow_html=True)
+    if search_query.strip():
+        try:
+            search_response = api_get(
+                "/search",
+                params={
+                    "q": search_query.strip(),
+                    "dataset": st.session_state.dataset_id,
+                },
+            )
+
+            found_entities = (
+                search_response.get("results", [])
+                if isinstance(search_response, dict)
+                else search_response
+            )
+
+            if found_entities:
+                with st.expander(
+                    f"Search Results ({len(found_entities)})",
+                    expanded=True,
+                ):
+                    for item in found_entities:
+                        e_id = item.get("id", "Unknown")
+                        e_type = item.get("type", "Unknown")
+
+                        if st.button(
+                            f"{e_id} ({e_type})",
+                            key=f"search_btn_{e_id}",
+                        ):
+                            if e_type in ("Account", "AMLAccount"):
+                                st.session_state.current_account = e_id
+
+                            st.session_state.selected_entity_id = e_id
+                            st.rerun()
+            else:
+                st.caption(
+                    f"No matching entities in dataset "
+                    f"'{st.session_state.dataset_id}'."
+                )
+
+        except Exception as exc:
+            st.error(f"Entity search failed: {exc}")
+
+st.markdown(
+    "<hr style='margin:4px 0 16px 0; border:none; "
+    "border-bottom:1px solid #E2E8F0;'>",
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -871,10 +942,12 @@ with st.sidebar:
         if chosen_ds_id == "ibm_amlsim":
             st.session_state.current_account = "AML_ACC_25"
             st.session_state.selected_entity_id = "AML_ACC_25"
+            st.session_state["sidebar_account_select"] = "AML_ACC_25"
             st.session_state["sidebar_acc_input"] = "AML_ACC_25"
         else:
             st.session_state.current_account = "ACC002"
             st.session_state.selected_entity_id = "ACC002"
+            st.session_state["sidebar_account_select"] = "ACC002"
             st.session_state["sidebar_acc_input"] = "ACC002"
         st.session_state.case_report_pdf = None
         st.session_state.assistant_messages = []
@@ -884,6 +957,7 @@ with st.sidebar:
     if st.session_state.dataset_id == "ibm_amlsim" and not st.session_state.current_account.startswith("AML_"):
         st.session_state.current_account = "AML_ACC_25"
         st.session_state.selected_entity_id = "AML_ACC_25"
+        st.session_state["sidebar_account_select"] = "AML_ACC_25"
         st.session_state["sidebar_acc_input"] = "AML_ACC_25"
         st.session_state.case_report_pdf = None
         st.session_state.assistant_messages = []
@@ -891,6 +965,7 @@ with st.sidebar:
     elif st.session_state.dataset_id == "demo_synthetic" and st.session_state.current_account.startswith("AML_"):
         st.session_state.current_account = "ACC002"
         st.session_state.selected_entity_id = "ACC002"
+        st.session_state["sidebar_account_select"] = "ACC002"
         st.session_state["sidebar_acc_input"] = "ACC002"
         st.session_state.case_report_pdf = None
         st.session_state.assistant_messages = []
@@ -901,8 +976,8 @@ with st.sidebar:
             """
             <div style="background:#EFF6FF; border:1px solid #BFDBFE; border-radius:8px; padding:8px 10px; font-size:11px; color:#1E40AF; margin-bottom:12px;">
                 <b>IBM AMLSim Graph</b><br>
-                • 30 Accounts · 45 Transactions · 2 Alerts<br>
-                • Real simulation data from IBM AMLSim<br>
+                • 30 Accounts · 133 Transactions (45 transfers, 88 cash) · 2 Alerts<br>
+                • Synthetic activity generated using IBM AMLSim<br>
                 • <i>Note: Device and IP entities not present in this schema.</i>
             </div>
             """,
@@ -932,12 +1007,55 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
 
-    account_input = st.text_input(
-        "Account ID",
-        value=st.session_state.current_account,
-        placeholder="Example: ACC002 or AML_ACC_25",
-        key="sidebar_acc_input",
-    ).strip().upper()
+    dataset_prefix = (
+        "AML_ACC_" if st.session_state.dataset_id == "ibm_amlsim" else "ACC"
+    )
+    try:
+        account_response = api_get(
+            "/search",
+            params={
+                "q": dataset_prefix,
+                "limit": 50,
+                "dataset": st.session_state.dataset_id,
+            },
+        )
+        account_ids = sorted({
+            item["id"]
+            for item in account_response.get("results", [])
+            if item.get("type") in ("Account", "AMLAccount")
+            and item.get("id")
+        })
+    except RuntimeError as exc:
+        account_ids = []
+        st.warning(f"Account selector could not load accounts: {exc}")
+
+    if account_ids:
+        selected_account = st.session_state.get("sidebar_account_select")
+        if selected_account not in account_ids:
+            selected_account = (
+                st.session_state.current_account
+                if st.session_state.current_account in account_ids
+                else account_ids[0]
+            )
+            st.session_state["sidebar_account_select"] = selected_account
+        account_input = st.selectbox(
+            "Account ID",
+            options=account_ids,
+            key="sidebar_account_select",
+        )
+    else:
+        st.info(
+            f"No accounts are currently available in "
+            f"'{st.session_state.dataset_id}'."
+        )
+        account_input = st.text_input(
+            "Account ID",
+            value=st.session_state.current_account,
+            placeholder="Example: ACC002 or AML_ACC_25",
+            key="sidebar_acc_input",
+        )
+
+    account_input = account_input.strip().upper()
 
     col_depth_label, col_depth_sel = st.columns([1, 2])
     with col_depth_label:
@@ -996,6 +1114,10 @@ with st.sidebar:
                     <span style="width:12px; height:12px; border-radius:3px; background:#DC2626; display:inline-block;"></span>
                     <span><b>AMLAlert</b> (esc. case)</span>
                 </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="width:12px; height:12px; border-radius:3px; background:#64748B; display:inline-block;"></span>
+                    <span><b>AMLBranch</b> (cash location)</span>
+                </div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1044,6 +1166,10 @@ with st.sidebar:
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span style="color:#10B981; font-weight:700;">➔</span>
                     <span><b>AML_RECEIVED</b> (receiver)</span>
+                </div>
+                <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="color:#64748B; font-weight:700;">➔</span>
+                    <span><b>AML_AT_BRANCH</b> (cash transaction)</span>
                 </div>
                 <div style="display:flex; align-items:center; gap:8px;">
                     <span style="color:#DC2626; font-weight:700;">➔</span>
@@ -1095,22 +1221,23 @@ try:
     graph_data = api_get(f"/graph/{current_acc}", params={"hops": depth, "dataset": current_ds})
 except Exception as exc:
     graph_data = {"nodes": [], "edges": []}
-    st.error(f"Could not connect to FastAPI at {API_URL}. Ensure the backend is running on port 8010.")
+    st.error(f"Could not load graph data: {exc}")
 
 try:
     investigation_data = api_get(f"/investigate/{current_acc}", params={"dataset": current_ds})
-except Exception:
+except Exception as exc:
     investigation_data = {}
+    st.warning(f"Could not load account investigation: {exc}")
 
 try:
     transaction_data = api_get(f"/account-evidence/{current_acc}", params={"dataset": current_ds})
-except Exception:
+except Exception as exc:
     transaction_data = {}
+    st.warning(f"Could not load transaction and alert evidence: {exc}")
 
-try:
-    network_data = detect_connected_accounts(current_acc, dataset_id=current_ds) or {}
-except Exception:
-    network_data = {}
+network_data = {
+    "related_accounts": investigation_data.get("details", [])
+}
 
 
 # ============================================================
@@ -1152,6 +1279,7 @@ if selected_view == "Investigation":
             acc_count = sum(1 for n in all_nodes if n.get("label") in ("Account", "AMLAccount"))
             txn_count = sum(1 for n in all_nodes if n.get("label") in ("Transaction", "AMLTransaction"))
             alert_count = sum(1 for n in all_nodes if n.get("label") == "AMLAlert")
+            branch_count = sum(1 for n in all_nodes if n.get("label") == "AMLBranch")
 
             st.markdown(
                 f"""
@@ -1161,6 +1289,7 @@ if selected_view == "Investigation":
                     <span class="metric-pill pill-accounts"><b>{acc_count}</b> Accounts</span>
                     <span class="metric-pill pill-txns"><b>{txn_count}</b> Transactions</span>
                     <span class="metric-pill" style="background:#FEE2E2; color:#991B1B; border:1px solid #FECACA; padding:4px 10px; border-radius:12px; font-size:12px; font-weight:600;"><b>{alert_count}</b> Alerts</span>
+                    <span class="metric-pill pill-neutral"><b>{branch_count}</b> Branches</span>
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -1200,17 +1329,23 @@ if selected_view == "Investigation":
         selected_node = st.session_state.selected_entity_id
         if selected_node not in all_node_ids and current_acc in all_node_ids:
             selected_node = current_acc
+        if not all_node_ids:
+            st.info(
+                "No graph nodes were returned. Confirm the account exists "
+                "in the selected dataset and that the graph has been imported."
+            )
 
         focus_col1, focus_col2 = st.columns([3, 1])
         with focus_col1:
             picked_node = st.selectbox(
                 "Focus / Inspect Node",
-                options=all_node_ids,
+                options=all_node_ids or ["No graph nodes available"],
                 index=all_node_ids.index(selected_node) if selected_node in all_node_ids else 0,
                 key="node_focus_picker",
+                disabled=not all_node_ids,
                 help="Select any node to inspect details and highlight in the 3D graph.",
             )
-            if picked_node != st.session_state.selected_entity_id:
+            if picked_node in all_node_ids and picked_node != st.session_state.selected_entity_id:
                 st.session_state.selected_entity_id = picked_node
 
         # Render Main Graph
@@ -1443,10 +1578,18 @@ if selected_view == "Investigation":
                             t_id = t.get("transaction_id", "—")
                             amt = t.get("amount", 0.0)
                             direction = str(t.get("direction", "sent")).lower()
-                            cparty = t.get("counterparty", "—")
+                            cparty = t.get("counterparty") or (
+                                f"Branch {t.get('branch_id')}"
+                                if t.get("branch_id") is not None
+                                else "—"
+                            )
                             status = str(t.get("status", "simulated")).lower()
 
-                            arrow = "↗️ Sent to" if direction == "sent" else "↙️ From"
+                            arrow = (
+                                "🏦 Cash at" if t.get("cash_transaction")
+                                else "↗️ Sent to" if direction == "sent"
+                                else "↙️ From"
+                            )
                             amt_fmt = f"${amt:,.2f}" if isinstance(amt, (int, float)) else str(amt)
                             status_badge = '<span class="badge-high-risk">Flagged</span>' if status == "flagged" else '<span class="metric-pill pill-neutral">Simulated</span>'
 
@@ -1495,13 +1638,15 @@ if selected_view == "Investigation":
                                 <div class="entity-row">
                                     <div>
                                         <b>🚨 {al_id}</b><br>
-                                        <span style="font-size:10px; color:#64748B;">Pattern: <b>{pat}</b> · Date: {date_str}</span>
+                                        <span style="font-size:10px; color:#64748B;">Check: <b>{pat}</b> · Date: {date_str} · Escalated: {bool(props.get('escalated'))}</span>
                                     </div>
                                     {badge}
                                 </div>
                                 """,
                                 unsafe_allow_html=True,
                             )
+                            if props.get("alert_text"):
+                                st.caption(props["alert_text"])
                         for al_id in direct_alert_ids:
                             if al_id not in seen_alerts:
                                 st.markdown(
@@ -1607,7 +1752,14 @@ if selected_view == "Investigation":
                     amt_str = f"{curr_symbol}{amt:,.2f}" if isinstance(amt, (int, float)) else str(amt or "—")
                     status_badge = '<span class="badge-flagged">Flagged</span>' if str(t.get("status", "")).lower() == "flagged" else '<span class="badge-completed">Completed</span>'
                     target_col = "Counterparty" if current_ds == "ibm_amlsim" else "Merchant"
-                    target_val = t.get("counterparty") or t.get("merchant_id", "—")
+                    target_val = (
+                        t.get("counterparty")
+                        or (
+                            f"Branch {t.get('branch_id')}"
+                            if t.get("branch_id") is not None
+                            else t.get("merchant_id", "—")
+                        )
+                    )
                     tx_display.append({
                         "Transaction ID": t.get("transaction_id"),
                         "Amount": amt_str,
@@ -1678,19 +1830,32 @@ if selected_view == "Investigation":
                 if rel_accs:
                     findings_bullets.append(f"{current_acc} is linked to {len(rel_accs)} counterparty account(s) via transaction network.")
                 if flagged_cnt > 0:
-                    findings_bullets.append(f"{flagged_cnt} out of {total_tx} transactions are flagged suspicious in simulation.")
-                alert_nodes = [n for n in all_nodes if n.get("label") == "AMLAlert" or "AMLAlert" in n.get("labels", [])]
-                if alert_nodes:
-                    findings_bullets.append(f"Linked to {len(alert_nodes)} AML alert(s) (cycle money laundering typology).")
-                findings_bullets.append("Forms a multi-counterparty cycle flow with rapid incoming/outgoing fund transfers.")
+                    findings_bullets.append(
+                        f"{flagged_cnt} of {total_tx} associated transactions are "
+                        "marked flagged by the AMLSim simulation."
+                    )
+                alerts = transaction_data.get("alerts", [])
+                for alert in alerts:
+                    findings_bullets.append(
+                        f"Alert {alert.get('alert_id')} is linked to this account "
+                        f"(check: {alert.get('check_name') or 'unknown'}; "
+                        f"date: {alert.get('event_date') or 'unknown'})."
+                    )
             else:
                 if rel_accs:
                     findings_bullets.append(f"{current_acc} is connected to {len(rel_accs)} other account(s) via shared infrastructure.")
                 if flagged_cnt > 0:
-                    findings_bullets.append(f"{flagged_cnt} out of {total_tx} transactions are flagged suspicious.")
+                    findings_bullets.append(
+                        f"{flagged_cnt} of {total_tx} synthetic transactions "
+                        "are flagged for review."
+                    )
                 if shared_devs:
                     findings_bullets.append(f"Shares device(s) {', '.join(shared_devs)} with neighboring accounts.")
-                findings_bullets.append("Forms a connected graph cluster with multiple shared resources.")
+            if not findings_bullets:
+                findings_bullets.append(
+                    "No connected-account, transaction-flag, or alert evidence "
+                    "was returned for this account."
+                )
 
             for b in findings_bullets:
                 st.markdown(f"• <span style='font-size:12px;'>{b}</span>", unsafe_allow_html=True)
@@ -2000,48 +2165,111 @@ elif selected_view == "Graph Explorer":
             st.markdown("<div style='height:28px;'></div>", unsafe_allow_html=True)
             find_btn = st.button("Find Paths", type="primary", use_container_width=True)
 
-        if find_btn or (src_input and tgt_input):
+        if find_btn:
             with st.spinner("Finding paths in FalkorDB..."):
-                path_res = find_graph_paths(src_input, tgt_input, max_hops=hop_limit, dataset_id=current_ds)
+                try:
+                    path_res = api_get(
+                        "/paths",
+                        params={
+                            "source": src_input,
+                            "target": tgt_input,
+                            "hops": hop_limit,
+                            "dataset": current_ds,
+                        },
+                    )
 
-            paths_list = path_res.get("paths", [])
-            st.info(path_res.get("message", "Search completed."))
+                    paths_list = path_res.get("paths", [])
+                    st.info(path_res.get("message", "Search completed."))
 
-            if paths_list:
-                selected_path_idx = st.selectbox(
-                    "Select Path to Visualize",
-                    options=range(len(paths_list)),
-                    format_func=lambda i: f"Path {i+1}: {paths_list[i]['summary']} ({paths_list[i]['hops']} hops)",
-                )
-                chosen_path = paths_list[selected_path_idx]
+                    if paths_list:
+                        selected_path_idx = st.selectbox(
+                            "Select Path to Visualize",
+                            options=range(len(paths_list)),
+                            format_func=lambda i: (
+                                f"Path {i + 1}: "
+                                f"{paths_list[i].get('summary', 'Connected path')} "
+                                f"({paths_list[i].get('hops', 0)} hops)"
+                            ),
+                        )
 
-                # Render Path visualization
-                p_nodes = chosen_path.get("steps", [])
-                p_edges = chosen_path.get("relationships", [])
+                        chosen_path = paths_list[selected_path_idx]
+                        p_nodes = chosen_path.get("steps", [])
+                        p_edges = chosen_path.get("relationships", [])
 
-                # Stepper display
-                st.markdown(f"**Path Steps ({chosen_path['hops']} hops):**")
-                stepper_html = "<div style='display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-bottom:12px;'>"
-                for i, step_id in enumerate(p_nodes):
-                    icon = "👤" if step_id.startswith("ACC") else "💻" if step_id.startswith("DEV") else "🌐" if step_id.startswith("IP") else "🏪" if step_id.startswith("MER") else "💳"
-                    stepper_html += f"<div style='background:#EFF6FF; border:1px solid #BFDBFE; border-radius:8px; padding:6px 10px; font-size:12px; font-weight:700;'>{icon} {step_id}</div>"
-                    if i < len(p_edges):
-                        rel_name = p_edges[i]
-                        stepper_html += f"<div style='color:#2563EB; font-weight:700; font-size:11px;'>➔ [{rel_name}] ➔</div>"
-                stepper_html += "</div>"
-                st.markdown(stepper_html, unsafe_allow_html=True)
+                        st.markdown(
+                            f"**Path Steps ({chosen_path.get('hops', 0)} hops):**"
+                        )
 
-                # Evidence Breakdown
-                st.markdown("**Path Evidence References:**")
-                for ev_line in chosen_path.get("evidence", []):
-                    st.write(f"• {ev_line}")
+                        stepper_html = (
+                            "<div style='display:flex; flex-wrap:wrap; "
+                            "align-items:center; gap:8px; margin-bottom:12px;'>"
+                        )
+
+                        for i, step_id in enumerate(p_nodes):
+                            step_id = str(step_id)
+
+                            icon = (
+                                "👤" if step_id.startswith(("ACC", "AML_ACC"))
+                                else "💻" if step_id.startswith("DEV")
+                                else "🌐" if step_id.startswith("IP")
+                                else "🏪" if step_id.startswith("MER")
+                                else "🏦" if step_id.startswith("AML_BRANCH")
+                                else "🚨" if step_id.startswith("AML_ALERT")
+                                else "💳"
+                            )
+
+                            stepper_html += (
+                                "<div style='background:#EFF6FF; "
+                                "border:1px solid #BFDBFE; border-radius:8px; "
+                                "padding:6px 10px; font-size:12px; font-weight:700;'>"
+                                f"{icon} {step_id}</div>"
+                            )
+
+                            if i < len(p_edges):
+                                rel_name = p_edges[i]
+                                stepper_html += (
+                                    "<div style='color:#2563EB; font-weight:700; "
+                                    "font-size:11px;'>"
+                                    f"➔ [{rel_name}] ➔</div>"
+                                )
+
+                        stepper_html += "</div>"
+                        st.markdown(stepper_html, unsafe_allow_html=True)
+
+                        st.markdown("**Path Evidence References:**")
+
+                        evidence = chosen_path.get("evidence", [])
+                        if evidence:
+                            for ev_line in evidence:
+                                st.write(f"• {ev_line}")
+                        else:
+                            st.caption("No additional evidence references returned.")
+
+                    else:
+                        st.warning("No paths were found between these entities.")
+
+                except Exception as exc:
+                    st.error(f"Path search failed: {exc}")
 
     # Suspicious Clusters Tab
     with exp_tabs[1]:
         st.markdown("#### Connected Account Rings Discovered in FalkorDB")
-        st.caption("Clusters grouped by shared infrastructure or transaction flows with explainable heuristic risk scoring.")
+        st.caption(
+            "Clusters are grouped using the selected dataset's relationships "
+            "and ranked with explainable heuristics, not fraud probabilities."
+        )
 
-        clusters = detect_suspicious_clusters(dataset_id=current_ds)
+        try:
+            cluster_response = api_get(
+                "/clusters",
+                params={"dataset": current_ds},
+            )
+            clusters = cluster_response.get("clusters", [])
+            if cluster_response.get("warning"):
+                st.caption(cluster_response["warning"])
+        except Exception as exc:
+            clusters = []
+            st.error(f"Cluster analysis failed: {exc}")
         if clusters:
             for c in clusters:
                 prio = c["heuristic_priority"]
@@ -2092,10 +2320,31 @@ elif selected_view == "Graph Explorer":
         st.markdown("#### FalkorDB Cypher Query Inspector")
         st.caption("Verify the actual Cypher queries running against FalkorDB graph storage.")
 
+        root_label = (
+            "AMLAccount" if current_ds == "ibm_amlsim" else "Account"
+        )
+        if current_ds == "ibm_amlsim":
+            relationship_query = """
+MATCH (a:AMLAccount {id: $account_id})
+OPTIONAL MATCH (a)-[:AML_SENT]->(tx:AMLTransaction)-[:AML_RECEIVED]->(b:AMLAccount)
+RETURN b.id AS counterparty, collect(DISTINCT tx.id) AS transactions;
+
+MATCH (a:AMLAccount {id: $account_id})-[:HAS_ALERT]->(al:AMLAlert)
+RETURN al.id AS alert_id, al.check_name, al.event_date;
+"""
+        else:
+            relationship_query = """
+MATCH (a:Account {id: $account_id})
+MATCH (b:Account) WHERE a.id <> b.id
+OPTIONAL MATCH (a)-[:USES_DEVICE]->(d:Device)<-[:USES_DEVICE]-(b)
+OPTIONAL MATCH (a)-[:CONNECTS_FROM]->(ip:IPAddress)<-[:CONNECTS_FROM]-(b)
+OPTIONAL MATCH (a)-[:MADE]->(:Transaction)-[:PAID_TO]->(m:Merchant)<-[:PAID_TO]-(:Transaction)<-[:MADE]-(b)
+RETURN b.id AS related_account, collect(DISTINCT d.id), collect(DISTINCT ip.id), collect(DISTINCT m.id);
+"""
         st.code(
-            """
+            f"""
 // 1. Multi-hop Graph Traversal (Bounded)
-MATCH (root:Account {id: $account_id})
+MATCH (root:{root_label} {{id: $account_id}})
 MATCH path = (root)-[*1..3]-(neighbor)
 WHERE length(path) <= $hops
 WITH collect(path) AS paths
@@ -2106,14 +2355,9 @@ UNWIND paths AS p
 UNWIND relationships(p) AS r
 RETURN graph_nodes, collect(DISTINCT r) AS graph_edges;
 
-// 2. Pair-Specific Shared Entities Query
-MATCH (a:Account {id: $account_id})
-MATCH (b:Account) WHERE a.id <> b.id
-OPTIONAL MATCH (a)-[:USES_DEVICE]->(d:Device)<-[:USES_DEVICE]-(b)
-OPTIONAL MATCH (a)-[:CONNECTS_FROM]->(ip:IPAddress)<-[:CONNECTS_FROM]-(b)
-OPTIONAL MATCH (a)-[:MADE]->(:Transaction)-[:PAID_TO]->(m:Merchant)<-[:PAID_TO]-(:Transaction)<-[:MADE]-(b)
-RETURN b.id AS related_account, collect(DISTINCT d.id), collect(DISTINCT ip.id), collect(DISTINCT m.id);
-            """,
+// 2. Dataset-specific account and alert/relationship evidence
+{relationship_query}
+""",
             language="cypher",
         )
 

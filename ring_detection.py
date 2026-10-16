@@ -265,7 +265,7 @@ def find_graph_paths(
 
     query = """
     MATCH (s {id: $source_id}), (t {id: $target_id})
-    MATCH path = (s)-[*1..4]-(t)
+    MATCH path = (s)-[*1..6]-(t)
     WHERE length(path) <= $hops
     RETURN [n IN nodes(path) | {id: n.id, label: labels(n)[0], properties: properties(n)}] AS path_nodes,
            [r IN relationships(path) | {source: startNode(r).id, target: endNode(r).id, type: type(r)}] AS path_edges,
@@ -322,14 +322,7 @@ def find_graph_paths(
             ),
         }
     except Exception as exc:
-        return {
-            "source_id": source_id,
-            "target_id": target_id,
-            "paths": [],
-            "path_count": 0,
-            "error": str(exc),
-            "message": f"Graph path query failed: {exc}",
-        }
+        raise RuntimeError(f"Graph path query failed: {exc}") from exc
 
 
 def detect_suspicious_clusters(dataset_id: str = "demo_synthetic") -> list[dict]:
@@ -359,8 +352,10 @@ def detect_suspicious_clusters(dataset_id: str = "demo_synthetic") -> list[dict]
 
         try:
             result = target_graph.query(query)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to query synthetic graph clusters: {exc}"
+            ) from exc
 
         g = nx.Graph()
         link_details = {}
@@ -413,8 +408,10 @@ def detect_suspicious_clusters(dataset_id: str = "demo_synthetic") -> list[dict]
                         "transaction_id": trow[1],
                         "amount": trow[2],
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Unable to query flagged synthetic transactions: {exc}"
+                ) from exc
 
             heuristic_score = (
                 len(accounts) * 15
@@ -462,8 +459,10 @@ def detect_suspicious_clusters(dataset_id: str = "demo_synthetic") -> list[dict]
         """
         try:
             result = target_graph.query(query)
-        except Exception:
-            return []
+        except Exception as exc:
+            raise RuntimeError(
+                f"Unable to query AMLSim graph clusters: {exc}"
+            ) from exc
 
         g = nx.Graph()
         link_details = {}
@@ -511,8 +510,10 @@ def detect_suspicious_clusters(dataset_id: str = "demo_synthetic") -> list[dict]
                         "is_fraud": bool(frow[1]),
                         "suspicious": bool(frow[2]),
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Unable to query flagged AMLSim accounts: {exc}"
+                ) from exc
 
             heuristic_score = (
                 len(accounts) * 10
@@ -578,8 +579,8 @@ def search_graph_entities(query_text: str, limit: int = 15, dataset_id: str = "d
                 "properties": row[2] if isinstance(row[2], dict) else {},
             })
         return entities
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"Unable to search graph entities: {exc}") from exc
 
 
 if __name__ == "__main__":

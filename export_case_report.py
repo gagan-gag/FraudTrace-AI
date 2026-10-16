@@ -683,6 +683,10 @@ def build_report(
             ),
         ],
         [
+            "Linked alert count",
+            str(first_value(account_evidence, ("alert_count",), 0)),
+        ],
+        [
             "Graph nodes",
             str(len(graph_data.get("nodes", []))),
         ],
@@ -792,6 +796,14 @@ def build_report(
         story,
         "Transaction Evidence",
         transactions if isinstance(transactions, list) else [],
+        styles,
+    )
+
+    alerts = first_value(account_evidence, ("alerts",), [])
+    add_list_section(
+        story,
+        "Linked AML Alerts",
+        alerts if isinstance(alerts, list) else [],
         styles,
     )
 

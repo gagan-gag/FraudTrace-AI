@@ -103,7 +103,7 @@ Exports comprehensive investigation findings, related accounts, transaction evid
 Allows seamless switching between synthetic demonstration data (`demo_synthetic` graph: `FraudTrace`) and real-world-style transaction networks (`ibm_amlsim` graph: `ibm_amlsim`). Strict server-side allowlisting guarantees complete graph isolation and prevents cross-contamination.
 
 ### 11. Automated Test Suite
-Includes 30 comprehensive unit tests across 5 test suites plus 28 automated API smoke checks (58 total tests passed, 0 failures).
+Includes unit, graph-isolation, AMLSim import, PDF report, and API smoke checks.
 
 ---
 
@@ -114,11 +114,11 @@ FraudTrace AI supports two distinct graph datasets simultaneously:
 | Dataset ID | Graph Name | Focus & Characteristics | Key Entities & Labels | Recommended Starting Account |
 |---|---|---|---|---|
 | `demo_synthetic` | `FraudTrace` | Synthetic fraud ring with shared infrastructure signals | `Account`, `Device`, `IPAddress`, `Merchant`, `Transaction` | `ACC002` (Shares device with `ACC001`) |
-| `ibm_amlsim` | `ibm_amlsim` | Transaction network with alerting and money-laundering typologies | `AMLAccount`, `AMLTransaction`, `AMLAlert` | `AML_ACC_25` (Has alert `AML_ALERT_1`) |
+| `ibm_amlsim` | `ibm_amlsim` | Synthetic AMLSim network with transfers, cash activity, branches, and alerts | `AMLAccount`, `AMLTransaction`, `AMLAlert`, `AMLBranch` | `AML_ACC_25` (Has alert `AML_ALERT_0`) |
 
 ### Key Guarantees:
 1. **Server-Side Allowlist**: Controlled via `DATASET_ALLOWLIST = frozenset({"demo_synthetic", "ibm_amlsim"})` in [dataset_registry.py](file:///d:/PROJECTS/FraudTrace%20AI/dataset_registry.py). Arbitrary graph names are strictly rejected with HTTP 400.
-2. **Schema Preservation**: The AMLSim dataset does not invent fake device/IP entities; instead, accounts connect via counterparty transactions (`AML_SENT`, `AML_RECEIVED`) and shared alerts (`HAS_ALERT`).
+2. **Schema Preservation**: The AMLSim dataset does not invent fake device/IP entities. Account transfers use `AML_SENT` and `AML_RECEIVED`; cash transactions link the account to an `AMLTransaction`, which records its branch and links to an `AMLBranch` using `AML_AT_BRANCH`. Alerts link to their source account using `HAS_ALERT`.
 3. **Investigation Assistant Awareness**: The assistant explicitly informs the investigator of the active dataset and adapts its traversal logic accordingly.
 
 ---
@@ -303,7 +303,7 @@ FraudTrace AI/
 ├── dashboard.py                # Streamlit 3D molecular investigation dashboard
 ├── dataset_registry.py         # Multi-dataset allowlist and registry
 ├── amlsim_importer.py          # IBM AMLSim CSV graph importer
-├── amlsim_data/                # AMLSim CSV source data (accounts, tx, alerts)
+├── amlsim_data/                # AMLSim CSV source data (accounts, tx, cash_tx, alerts)
 ├── seed_graph.py               # Synthetic demo graph initialization
 ├── inspect_graph.py            # Graph exploration and Cypher inspector
 ├── investigate.py              # Account investigation and risk scoring
@@ -395,9 +395,12 @@ FraudTrace AI includes two graphs:
 
 2. **IBM AMLSim Graph (`ibm_amlsim`)**:
    ```powershell
+   python amlsim_importer.py --dry-run
    python amlsim_importer.py
    ```
-   *(Optional: run with `--dry-run` to preview records without modifying database).*
+   The importer validates all four CSV files before connecting and uses the dataset registry's configured database connection. The sample data includes 30 accounts, 45 account transfers, 88 cash transactions, and 2 alerts. Cash transactions are stored as `AMLTransaction` nodes linked to the source account and branch.
+
+Database settings are loaded from the project `.env` for local development; environment variables supplied by a hosting provider take precedence. Keep `.env` out of version control.
 
 ---
 
@@ -477,6 +480,8 @@ streamlit run dashboard.py
 The Streamlit UI opens automatically in your browser at:
 - Dashboard: [http://localhost:8501](http://localhost:8501)
 
+The dashboard reads `API_BASE_URL` to locate FastAPI and defaults to `http://127.0.0.1:8010` for local development. For a hosted Streamlit dashboard, set `API_BASE_URL` in the frontend provider's environment settings to `https://fraudtrace-ai-backend.onrender.com` (without a trailing slash). Set this variable only for the frontend; configure FalkorDB credentials on the backend provider.
+
 ### Using the Multi-Dataset Dashboard
 1. Use the **Dataset Selector** in the sidebar to switch between `FraudTrace AI Demo (Synthetic)` and `IBM AMLSim (Transaction Network)`.
 2. Enter an account to investigate (`ACC002` for Demo; `AML_ACC_25` for AMLSim).
@@ -532,39 +537,25 @@ For interactive schema inspection, use the Swagger UI at [http://127.0.0.1:8010/
 
 ## Testing
 
-### Run All Unit Tests (30 Tests)
+### Run All Unit Tests
 
 ```powershell
-python -m unittest discover -s . -p "test_*.py" -v
+.\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py" -v
 ```
 
-### Run End-to-End API Smoke Tests (28 Checks)
+### Run End-to-End API Smoke Tests
 
 ```powershell
-python smoke_test.py
+.\.venv\Scripts\python.exe smoke_test.py
 ```
 
-### Run Dataset Isolation Verification
+### Verify the AMLSim API
 
 ```powershell
-python verify_amlsim_api.py
+.\.venv\Scripts\python.exe verify_amlsim_api.py
 ```
 
-### Verified Development Results
-
-The current development environment passes 100% of tests:
-
-| Test suite | Purpose | Result |
-|---|---|---:|
-| API smoke checks (`smoke_test.py`) | Live HTTP endpoints across both datasets | 28 passed |
-| Case memory tests (`test_case_memory.py`) | Persistence & cross-session recall (Track 02) | 3 passed |
-| PDF case report tests (`test_case_report.py`) | Layout, tables, evidence & UTF-8 integrity | 5 passed |
-| Graph capabilities tests (`test_enhanced_features.py`) | Multi-hop paths, cluster detection, entity search | 9 passed |
-| AMLSim importer tests (`test_amlsim_importer.py`) | CSV ETL pipeline, schemas, dry-run & live import | 6 passed |
-| Dataset isolation tests (`test_dataset_isolation.py`) | Strict cross-dataset isolation & boundary checks | 7 passed |
-| **Total automated checks across all suites** | **Complete coverage across backend, data & UI** | **58 passed (0 failed)** |
-
-The test suite validates graph traversal, multi-hop path finding, cluster detection, entity search, evidence traceability, UTF-8 encoding integrity, PDF generation, dataset isolation, and input boundary conditions.
+Both API scripts require the local backend at `http://127.0.0.1:8010`; set `API_BASE_URL` to verify a hosted backend instead. The AMLSim verifier checks account search, graph traversal, transaction and alert evidence, paths, clusters, and assistant evidence, then removes its temporary case-memory record.
 
 ---
 

@@ -14,6 +14,8 @@ Requirements:
 """
 
 import sys
+import os
+import uuid
 from typing import Any
 
 if sys.platform == "win32":
@@ -24,8 +26,9 @@ if sys.platform == "win32":
         pass
 
 import requests
+from dataset_registry import get_graph
 
-BASE_URL = "http://127.0.0.1:8010"
+BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
 TEST_ACCOUNT = "ACC002"
 TIMEOUT_SECONDS = 10
 
@@ -300,12 +303,14 @@ def run_tests() -> None:
     # ---------------------------------------------------------
     print("\n--- 4. Investigation Assistant ---")
 
+    session_id = f"smoke-test-{uuid.uuid4().hex}"
     try:
         status, answer = post_json(
             "/ask",
             {
                 "account_id": TEST_ACCOUNT,
                 "question": "Why is this account suspicious?",
+                "session_id": session_id,
             },
         )
 
@@ -336,6 +341,17 @@ def run_tests() -> None:
 
     except requests.RequestException as exc:
         check("Assistant endpoint is reachable", False, str(exc))
+    finally:
+        try:
+            get_graph("demo_synthetic").query(
+                """
+                MATCH (m:InvestigationMemory {session_id: $session_id})
+                DETACH DELETE m
+                """,
+                params={"session_id": session_id},
+            )
+        except Exception as exc:
+            print(f"[WARN] Could not clean up smoke-test memory: {exc}")
 
     # ---------------------------------------------------------
     # 5. Input validation

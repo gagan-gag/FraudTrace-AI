@@ -5,7 +5,9 @@ Tests CSV parsing, column validation, dry-run mode, and idempotency.
 """
 
 import unittest
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from dataset_registry import get_graph, get_graph_stats
 from amlsim_importer import (
@@ -18,6 +20,7 @@ from amlsim_importer import (
     _safe_bool,
     DATA_DIR,
 )
+from ai_assistant import get_transaction_evidence
 
 
 class AMLSimImporterTests(unittest.TestCase):
@@ -45,34 +48,77 @@ class AMLSimImporterTests(unittest.TestCase):
         self.assertTrue(data_path.exists(), f"Data directory {DATA_DIR} does not exist.")
         self.assertTrue((data_path / "accounts.csv").exists())
         self.assertTrue((data_path / "tx.csv").exists())
+        self.assertTrue((data_path / "cash_tx.csv").exists())
         self.assertTrue((data_path / "alerts.csv").exists())
         self.assertGreater((data_path / "accounts.csv").stat().st_size, 0)
         self.assertGreater((data_path / "tx.csv").stat().st_size, 0)
+        self.assertGreater((data_path / "cash_tx.csv").stat().st_size, 0)
         self.assertGreater((data_path / "alerts.csv").stat().st_size, 0)
 
     def test_dry_run_mode_returns_counts_without_errors(self):
         stats = run_import(dry_run=True, verbose=False)
         self.assertEqual(stats.accounts_read, 30)
         self.assertEqual(stats.tx_read, 45)
+        self.assertEqual(stats.cash_transactions_read, 88)
         self.assertEqual(stats.alerts_read, 2)
+        self.assertEqual(stats.total_read, 165)
         self.assertEqual(stats.total_rejected, 0)
         self.assertEqual(stats.accounts_created, 30)
         self.assertEqual(stats.tx_created, 45)
+        self.assertEqual(stats.cash_transactions_created, 88)
         self.assertEqual(stats.alerts_created, 2)
+
+    def test_missing_input_files_fail_before_database_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch("amlsim_importer.get_graph") as get_graph_mock:
+                result = run_import(
+                    data_dir=Path(temp_dir),
+                    dry_run=False,
+                    verbose=False,
+                )
+
+        self.assertFalse(result["success"])
+        self.assertTrue(result["validation_errors"])
+        get_graph_mock.assert_not_called()
 
     def test_idempotent_live_import(self):
         """Live import should be idempotent; re-running it should not duplicate nodes."""
         stats_before = get_graph_stats("ibm_amlsim")
         nodes_before = stats_before["total_nodes"]
         rels_before = stats_before["total_relationships"]
+        demo_before = get_graph_stats("demo_synthetic")
 
         # Run import again
         import_stats = run_import(dry_run=False, verbose=False)
+        self.assertTrue(import_stats.success)
         self.assertEqual(import_stats.total_rejected, 0)
+        self.assertEqual(import_stats.total_created, 0)
+        self.assertEqual(import_stats.accounts_updated, 30)
+        self.assertEqual(import_stats.tx_updated, 45)
+        self.assertEqual(import_stats.cash_transactions_updated, 88)
+        self.assertEqual(import_stats.alerts_updated, 2)
 
         stats_after = get_graph_stats("ibm_amlsim")
         self.assertEqual(stats_after["total_nodes"], nodes_before)
         self.assertEqual(stats_after["total_relationships"], rels_before)
+        self.assertEqual(stats_after["node_counts"]["AMLAccount"], 30)
+        self.assertEqual(stats_after["node_counts"]["AMLTransaction"], 133)
+        self.assertEqual(stats_after["node_counts"]["AMLAlert"], 2)
+        self.assertEqual(stats_after["node_counts"]["AMLBranch"], 14)
+        self.assertEqual(stats_after["relationship_counts"]["AML_SENT"], 133)
+        self.assertEqual(stats_after["relationship_counts"]["AML_RECEIVED"], 45)
+        self.assertEqual(stats_after["relationship_counts"]["AML_AT_BRANCH"], 88)
+        self.assertEqual(stats_after["relationship_counts"]["HAS_ALERT"], 2)
+        self.assertEqual(
+            get_graph_stats("demo_synthetic"),
+            demo_before,
+        )
+
+    def test_aml_acc_25_has_its_source_alert(self):
+        evidence = get_transaction_evidence("AML_ACC_25", "ibm_amlsim")
+        self.assertTrue(evidence["found"])
+        self.assertEqual(evidence["alert_count"], 1)
+        self.assertEqual(evidence["alerts"][0]["alert_id"], "AML_ALERT_0")
 
 
 if __name__ == "__main__":

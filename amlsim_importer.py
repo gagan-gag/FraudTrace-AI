@@ -16,15 +16,14 @@ from __future__ import annotations
 
 import argparse
 import csv
-import io
-import os
+import math
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from falkordb import FalkorDB
+from dataset_registry import DATASET_IBM_AMLSIM, get_graph
 
 # ============================================================
 # CONFIGURATION
@@ -33,6 +32,7 @@ from falkordb import FalkorDB
 DATA_DIR = Path(__file__).parent / "amlsim_data"
 ACCOUNTS_FILE = DATA_DIR / "accounts.csv"
 TX_FILE = DATA_DIR / "tx.csv"
+CASH_TX_FILE = DATA_DIR / "cash_tx.csv"
 ALERTS_FILE = DATA_DIR / "alerts.csv"
 
 GRAPH_NAME = "ibm_amlsim"
@@ -45,6 +45,10 @@ REQUIRED_ACCOUNTS_COLS = {
 }
 REQUIRED_TX_COLS = {
     "TXN_ID", "ACCOUNT_ID", "COUNTER_PARTY_ACCOUNT_NUM",
+    "TXN_SOURCE_TYPE_CODE", "TXN_AMOUNT_ORIG",
+}
+REQUIRED_CASH_TX_COLS = {
+    "TXN_ID", "ACCOUNT_ID", "BRANCH_ID",
     "TXN_SOURCE_TYPE_CODE", "TXN_AMOUNT_ORIG",
 }
 REQUIRED_ALERTS_COLS = {
@@ -190,6 +194,8 @@ def import_accounts(graph, rows: list[dict], dry_run: bool) -> ImportStats:
             "source_account_id": raw_id,
             "customer_id": str(row.get("PRIMARY_CUSTOMER_ID", "")).strip(),
             "init_balance": _safe_float(row.get("init_balance", "0")),
+            "start": str(row.get("start", "")).strip(),
+            "end": str(row.get("end", "")).strip(),
             "country": str(row.get("country", "")).strip(),
             "business": str(row.get("business", "")).strip(),
             "suspicious": _parse_bool(row.get("suspicious", "False")),
@@ -219,133 +225,208 @@ def import_accounts(graph, rows: list[dict], dry_run: bool) -> ImportStats:
 
 
 def _flush_account_batch(graph, batch: list[dict], stats: ImportStats) -> None:
-    for props in batch:
-        try:
-            result = graph.query(
-                """
-                MERGE (a:AMLAccount {id: $id})
-                ON CREATE SET
-                    a.source_account_id = $source_account_id,
-                    a.customer_id = $customer_id,
-                    a.init_balance = $init_balance,
-                    a.country = $country,
-                    a.business = $business,
-                    a.suspicious = $suspicious,
-                    a.is_fraud = $is_fraud,
-                    a.model_id = $model_id,
-                    a.dataset = $dataset,
-                    a.source_label = $source_label,
-                    a.created_at = $created_at
-                ON MATCH SET
-                    a.suspicious = $suspicious,
-                    a.is_fraud = $is_fraud,
-                    a.source_label = $source_label
-                RETURN a.id AS id, 1 AS created
-                """,
-                params={
-                    **props,
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
-            if result.result_set:
-                stats.created += 1
-            else:
-                stats.updated += 1
-        except Exception as exc:
-            stats.rejected += 1
-            stats.errors.append(f"Account {props.get('id')}: {exc}")
+    rows = [
+        {
+            **props,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for props in batch
+    ]
+
+    try:
+        existing_result = graph.query(
+            "MATCH (a:AMLAccount) WHERE a.id IN $ids RETURN a.id",
+            params={"ids": [row["id"] for row in rows]},
+        )
+        existing_ids = {
+            row[0] for row in existing_result.result_set if row and row[0]
+        }
+
+        graph.query(
+            """
+            UNWIND $rows AS row
+            MERGE (a:AMLAccount {id: row.id})
+            ON CREATE SET a.created_at = row.created_at
+            SET
+                a.source_account_id = row.source_account_id,
+                a.customer_id = row.customer_id,
+                a.init_balance = row.init_balance,
+                a.start = row.start,
+                a.end = row.end,
+                a.country = row.country,
+                a.business = row.business,
+                a.suspicious = row.suspicious,
+                a.is_fraud = row.is_fraud,
+                a.model_id = row.model_id,
+                a.dataset = row.dataset,
+                a.source_label = row.source_label
+            """,
+            params={"rows": rows},
+        )
+        stats.updated += sum(row["id"] in existing_ids for row in rows)
+        stats.created += sum(row["id"] not in existing_ids for row in rows)
+    except Exception as exc:
+        stats.rejected += len(rows)
+        stats.errors.extend(
+            f"Account {row['id']}: {exc}" for row in rows[:5]
+        )
 
 
 def import_transactions(graph, rows: list[dict], dry_run: bool) -> ImportStats:
     """
-    Import AML_SENT / AML_RECEIVED transaction relationships.
-    Each tx row: originator (ACCOUNT_ID) -[AML_SENT]-> (AMLTransaction) -[AML_RECEIVED]-> counterparty.
-    Idempotent MERGE on TXN_ID.
+    Import account-to-account AMLTransaction records.
     """
     stats = ImportStats("transactions")
+    prepared = _prepare_transaction_rows(rows, stats, cash=False)
+    _write_transaction_batches(graph, prepared, stats, dry_run)
+    return stats
 
+
+def import_cash_transactions(
+    graph,
+    rows: list[dict],
+    dry_run: bool,
+) -> ImportStats:
+    """Import cash transactions as AMLTransaction nodes with branch links."""
+    stats = ImportStats("cash_transactions")
+    prepared = _prepare_transaction_rows(rows, stats, cash=True)
+    _write_transaction_batches(graph, prepared, stats, dry_run)
+    return stats
+
+
+def _prepare_transaction_rows(
+    rows: list[dict],
+    stats: ImportStats,
+    cash: bool,
+) -> list[dict]:
+    prepared = []
     for row in rows:
         stats.read += 1
         raw_txn_id = str(row.get("TXN_ID", "")).strip()
         raw_src = str(row.get("ACCOUNT_ID", "")).strip()
         raw_dst = str(row.get("COUNTER_PARTY_ACCOUNT_NUM", "")).strip()
+        raw_branch = str(row.get("BRANCH_ID", "")).strip() if cash else ""
+        raw_amount = str(row.get("TXN_AMOUNT_ORIG", "")).strip()
 
+        problem = None
         if not raw_txn_id:
-            stats.rejected += 1
-            stats.errors.append(f"Row {stats.read}: missing TXN_ID")
-            continue
-        if not raw_src:
-            stats.rejected += 1
-            stats.errors.append(f"Row {stats.read}: missing ACCOUNT_ID in tx {raw_txn_id}")
-            continue
-
-        txn_id = _txn_id(raw_txn_id)
-        src_id = _acc_id(raw_src)
-        dst_id = _acc_id(raw_dst) if raw_dst else None
-        amount = _safe_float(row.get("TXN_AMOUNT_ORIG", "0"))
-        tx_type = str(row.get("TXN_SOURCE_TYPE_CODE", "UNKNOWN")).strip().upper()
-        step_start = str(row.get("start", "")).strip()
-
-        if amount < 0:
-            stats.rejected += 1
-            stats.errors.append(f"Tx {raw_txn_id}: negative amount {amount}")
-            continue
-
-        if dry_run:
-            stats.created += 1
-            continue
+            problem = "missing TXN_ID"
+        elif not raw_src:
+            problem = "missing ACCOUNT_ID"
+        elif cash and not raw_branch:
+            problem = "missing BRANCH_ID"
 
         try:
+            amount = float(raw_amount)
+            if not math.isfinite(amount):
+                raise ValueError("amount is not finite")
+            if amount < 0:
+                raise ValueError("amount is negative")
+        except (TypeError, ValueError) as exc:
+            problem = problem or f"invalid TXN_AMOUNT_ORIG ({exc})"
+            amount = 0.0
+
+        if problem:
+            stats.rejected += 1
+            stats.errors.append(f"Row {stats.read}: {problem}")
+            continue
+
+        tx_type = str(
+            row.get("TXN_SOURCE_TYPE_CODE", "UNKNOWN")
+        ).strip().upper() or "UNKNOWN"
+        prepared.append({
+            "id": _txn_id(raw_txn_id),
+            "raw_txn_id": raw_txn_id,
+            "src_id": _acc_id(raw_src),
+            "raw_src": raw_src,
+            "dst_id": _acc_id(raw_dst) if raw_dst else None,
+            "raw_dst": raw_dst,
+            "amount": amount,
+            "source_type": tx_type,
+            "tx_count": _safe_int(row.get("tx_count", "1"), default=1),
+            "step_start": str(row.get("start", "")).strip(),
+            "step_end": str(row.get("end", "")).strip(),
+            "run_date": str(row.get("RUN_DATE", "")).strip(),
+            "branch_id": raw_branch or None,
+            "branch_node_id": f"AML_BRANCH_{raw_branch}" if raw_branch else None,
+            "cash_transaction": cash,
+            "source_file": "cash_tx.csv" if cash else "tx.csv",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
+    return prepared
+
+
+def _write_transaction_batches(
+    graph,
+    rows: list[dict],
+    stats: ImportStats,
+    dry_run: bool,
+) -> None:
+    if dry_run:
+        stats.created += len(rows)
+        return
+
+    for offset in range(0, len(rows), BATCH_SIZE):
+        batch = rows[offset:offset + BATCH_SIZE]
+        ids = [row["id"] for row in batch]
+        try:
+            existing_result = graph.query(
+                "MATCH (t:AMLTransaction) WHERE t.id IN $ids RETURN t.id",
+                params={"ids": ids},
+            )
+            existing_ids = {
+                row[0] for row in existing_result.result_set if row and row[0]
+            }
+
             graph.query(
                 """
-                MERGE (t:AMLTransaction {id: $txn_id})
-                ON CREATE SET
-                    t.source_txn_id = $raw_txn_id,
-                    t.amount = $amount,
-                    t.tx_type = $tx_type,
-                    t.step_start = $step_start,
+                UNWIND $rows AS row
+                MERGE (t:AMLTransaction {id: row.id})
+                ON CREATE SET t.created_at = row.created_at
+                SET
+                    t.source_txn_id = row.raw_txn_id,
+                    t.amount = row.amount,
+                    t.source_type = row.source_type,
+                    t.tx_type = row.source_type,
+                    t.tx_count = row.tx_count,
+                    t.step_start = row.step_start,
+                    t.step_end = row.step_end,
+                    t.run_date = row.run_date,
+                    t.branch_id = row.branch_id,
+                    t.cash_transaction = row.cash_transaction,
+                    t.source_file = row.source_file,
                     t.dataset = 'ibm_amlsim',
                     t.status = 'simulated'
-                """,
-                params={
-                    "txn_id": txn_id,
-                    "raw_txn_id": raw_txn_id,
-                    "amount": amount,
-                    "tx_type": tx_type,
-                    "step_start": step_start,
-                },
-            )
-
-            # Link originator → transaction (ensure account exists)
-            graph.query(
-                """
-                MERGE (a:AMLAccount {id: $src_id})
-                ON CREATE SET a.dataset = 'ibm_amlsim', a.source_account_id = $raw_src
-                WITH a
-                MATCH (t:AMLTransaction {id: $txn_id})
-                MERGE (a)-[:AML_SENT]->(t)
-                """,
-                params={"src_id": src_id, "raw_src": raw_src, "txn_id": txn_id},
-            )
-
-            if dst_id:
-                graph.query(
-                    """
-                    MERGE (b:AMLAccount {id: $dst_id})
-                    ON CREATE SET b.dataset = 'ibm_amlsim', b.source_account_id = $raw_dst
-                    WITH b
-                    MATCH (t:AMLTransaction {id: $txn_id})
-                    MERGE (t)-[:AML_RECEIVED]->(b)
-                    """,
-                    params={"dst_id": dst_id, "raw_dst": raw_dst, "txn_id": txn_id},
+                MERGE (src:AMLAccount {id: row.src_id})
+                ON CREATE SET
+                    src.dataset = 'ibm_amlsim',
+                    src.source_account_id = row.raw_src
+                MERGE (src)-[:AML_SENT]->(t)
+                FOREACH (_ IN CASE WHEN row.dst_id IS NULL THEN [] ELSE [1] END |
+                    MERGE (dst:AMLAccount {id: row.dst_id})
+                    ON CREATE SET
+                        dst.dataset = 'ibm_amlsim',
+                        dst.source_account_id = row.raw_dst
+                    MERGE (t)-[:AML_RECEIVED]->(dst)
                 )
-
-            stats.created += 1
+                FOREACH (_ IN CASE WHEN row.branch_node_id IS NULL THEN [] ELSE [1] END |
+                    MERGE (branch:AMLBranch {id: row.branch_node_id})
+                    ON CREATE SET
+                        branch.dataset = 'ibm_amlsim',
+                        branch.source_branch_id = row.branch_id
+                    MERGE (t)-[:AML_AT_BRANCH]->(branch)
+                )
+                """,
+                params={"rows": batch},
+            )
+            stats.updated += sum(row["id"] in existing_ids for row in batch)
+            stats.created += sum(row["id"] not in existing_ids for row in batch)
         except Exception as exc:
-            stats.rejected += 1
-            stats.errors.append(f"Tx {raw_txn_id}: {exc}")
-
-    return stats
+            stats.rejected += len(batch)
+            stats.errors.extend(
+                f"Transaction {row['raw_txn_id']}: {exc}"
+                for row in batch[:5]
+            )
 
 
 def import_alerts(graph, rows: list[dict], dry_run: bool) -> ImportStats:
@@ -354,63 +435,84 @@ def import_alerts(graph, rows: list[dict], dry_run: bool) -> ImportStats:
     Idempotent on ALERT_KEY.
     """
     stats = ImportStats("alerts")
+    prepared = []
 
     for row in rows:
         stats.read += 1
         raw_key = str(row.get("ALERT_KEY", "")).strip()
         raw_acc = str(row.get("ACCOUNT_ID", "")).strip()
-
-        if not raw_key:
+        if not raw_key or not raw_acc:
             stats.rejected += 1
-            stats.errors.append(f"Row {stats.read}: missing ALERT_KEY")
+            stats.errors.append(
+                f"Row {stats.read}: missing ALERT_KEY or ACCOUNT_ID"
+            )
             continue
 
-        alert_id = f"AML_ALERT_{raw_key}"
-        acc_id = _acc_id(raw_acc) if raw_acc else None
-        pattern = str(row.get("CHECK_NAME", "unknown")).strip()
-        event_date = _parse_date(row.get("EVENT_DATE", ""))
-        escalated = str(row.get("Escalated_To_Case_Investigation", "")).strip().upper() == "YES"
+        prepared.append({
+            "id": _alert_id(raw_key),
+            "source_alert_key": raw_key,
+            "account_id": _acc_id(raw_acc),
+            "source_account_id": raw_acc,
+            "customer_id": str(row.get("CUSTOMER_ID", "")).strip(),
+            "alert_text": str(row.get("ALERT_TEXT", "")).strip(),
+            "check_name": str(row.get("CHECK_NAME", "unknown")).strip(),
+            "pattern": str(row.get("CHECK_NAME", "unknown")).strip(),
+            "event_date": _parse_date(row.get("EVENT_DATE", "")),
+            "organization_type": str(row.get("Organization_Type", "")).strip(),
+            "escalated": (
+                str(row.get("Escalated_To_Case_Investigation", ""))
+                .strip().upper() in ("YES", "TRUE", "1")
+            ),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        })
 
-        if dry_run:
-            stats.created += 1
-            continue
+    if dry_run:
+        stats.created += len(prepared)
+        return stats
 
+    for offset in range(0, len(prepared), BATCH_SIZE):
+        batch = prepared[offset:offset + BATCH_SIZE]
+        ids = [row["id"] for row in batch]
         try:
+            existing_result = graph.query(
+                "MATCH (al:AMLAlert) WHERE al.id IN $ids RETURN al.id",
+                params={"ids": ids},
+            )
+            existing_ids = {
+                row[0] for row in existing_result.result_set if row and row[0]
+            }
+
             graph.query(
                 """
-                MERGE (al:AMLAlert {id: $alert_id})
-                ON CREATE SET
-                    al.source_alert_key = $raw_key,
-                    al.pattern = $pattern,
-                    al.event_date = $event_date,
-                    al.escalated = $escalated,
+                UNWIND $rows AS row
+                MERGE (al:AMLAlert {id: row.id})
+                ON CREATE SET al.created_at = row.created_at
+                SET
+                    al.source_alert_key = row.source_alert_key,
+                    al.pattern = row.pattern,
+                    al.check_name = row.check_name,
+                    al.alert_text = row.alert_text,
+                    al.customer_id = row.customer_id,
+                    al.event_date = row.event_date,
+                    al.organization_type = row.organization_type,
+                    al.escalated = row.escalated,
                     al.dataset = 'ibm_amlsim'
+                MERGE (a:AMLAccount {id: row.account_id})
+                ON CREATE SET
+                    a.dataset = 'ibm_amlsim',
+                    a.source_account_id = row.source_account_id
+                MERGE (a)-[:HAS_ALERT]->(al)
                 """,
-                params={
-                    "alert_id": alert_id,
-                    "raw_key": raw_key,
-                    "pattern": pattern,
-                    "event_date": event_date,
-                    "escalated": escalated,
-                },
+                params={"rows": batch},
             )
-
-            if acc_id:
-                graph.query(
-                    """
-                    MERGE (a:AMLAccount {id: $acc_id})
-                    ON CREATE SET a.dataset = 'ibm_amlsim'
-                    WITH a
-                    MATCH (al:AMLAlert {id: $alert_id})
-                    MERGE (a)-[:HAS_ALERT]->(al)
-                    """,
-                    params={"acc_id": acc_id, "alert_id": alert_id},
-                )
-
-            stats.created += 1
+            stats.updated += sum(row["id"] in existing_ids for row in batch)
+            stats.created += sum(row["id"] not in existing_ids for row in batch)
         except Exception as exc:
-            stats.rejected += 1
-            stats.errors.append(f"Alert {raw_key}: {exc}")
+            stats.rejected += len(batch)
+            stats.errors.extend(
+                f"Alert {row['source_alert_key']}: {exc}"
+                for row in batch[:5]
+            )
 
     return stats
 
@@ -429,7 +531,7 @@ def run_import(
 
     Parameters
     ----------
-    data_dir  : Path to directory containing accounts.csv, tx.csv, alerts.csv.
+    data_dir  : Path to directory containing all four AMLSim CSV files.
                 Defaults to ./amlsim_data/
     dry_run   : If True, validate and count without writing to FalkorDB.
     verbose   : Print progress if True.
@@ -451,86 +553,155 @@ def run_import(
         print(f"Target graph:   {GRAPH_NAME}")
         print(f"{'='*60}\n")
 
-    # ---- 1. Load and validate all CSVs ----
+    # ---- 1. Load and validate all CSVs before opening the graph ----
     acc_rows, acc_errors = _load_csv(data_dir / "accounts.csv", REQUIRED_ACCOUNTS_COLS)
     tx_rows, tx_errors = _load_csv(data_dir / "tx.csv", REQUIRED_TX_COLS)
+    cash_rows, cash_errors = _load_csv(
+        data_dir / "cash_tx.csv",
+        REQUIRED_CASH_TX_COLS,
+    )
     alert_rows, alert_errors = _load_csv(data_dir / "alerts.csv", REQUIRED_ALERTS_COLS)
 
-    validation_errors: list[str] = acc_errors + tx_errors + alert_errors
-    if validation_errors:
-        for e in validation_errors:
-            print(f"  VALIDATION ERROR: {e}", file=sys.stderr)
-        return {
-            "success": False,
-            "dry_run": dry_run,
-            "validation_errors": validation_errors,
-        }
+    file_errors: list[str] = (
+        acc_errors + tx_errors + cash_errors + alert_errors
+    )
 
     if verbose:
-        print(f"[1/4] Files validated:")
+        print(f"[1/5] Files validated:")
         print(f"      accounts.csv : {len(acc_rows)} rows")
         print(f"      tx.csv       : {len(tx_rows)} rows")
+        print(f"      cash_tx.csv  : {len(cash_rows)} rows")
         print(f"      alerts.csv   : {len(alert_rows)} rows\n")
 
-    # ---- 2. Connect to graph ----
-    if not dry_run:
-        db = FalkorDB(host="localhost", port=6379)
-        graph = db.select_graph(GRAPH_NAME)
+    # Validate row-level data before opening the target graph.
+    checked_accounts = import_accounts(None, acc_rows, dry_run=True)
+    checked_transactions = import_transactions(None, tx_rows, dry_run=True)
+    checked_cash = import_cash_transactions(None, cash_rows, dry_run=True)
+    checked_alerts = import_alerts(None, alert_rows, dry_run=True)
+    checked_stats = [
+        checked_accounts,
+        checked_transactions,
+        checked_cash,
+        checked_alerts,
+    ]
+    validation_errors = file_errors + [
+        error
+        for stats in checked_stats
+        for error in stats.errors
+    ]
+
+    if validation_errors:
+        for error in validation_errors:
+            print(f"  VALIDATION ERROR: {error}", file=sys.stderr)
+        return ImportResult({
+            "success": False,
+            "dry_run": dry_run,
+            "graph_name": GRAPH_NAME,
+            "validation_errors": validation_errors,
+            "accounts": checked_accounts.summary(),
+            "transactions": checked_transactions.summary(),
+            "cash_transactions": checked_cash.summary(),
+            "alerts": checked_alerts.summary(),
+            "total_rejected": sum(stats.rejected for stats in checked_stats),
+        })
+
+    if dry_run:
+        acc_stats = checked_accounts
+        tx_stats = checked_transactions
+        cash_stats = checked_cash
+        alert_stats = checked_alerts
     else:
-        graph = None
+        graph = get_graph(DATASET_IBM_AMLSIM)
 
-    # ---- 3. Import phases ----
-    if verbose:
-        print("[2/4] Importing accounts ...")
-    acc_stats = import_accounts(graph, acc_rows, dry_run)
-    if verbose:
-        print(f"      read={acc_stats.read} created={acc_stats.created} "
-              f"rejected={acc_stats.rejected}")
+        # ---- 2. Import validated data in idempotent batches ----
+        if verbose:
+            print("[2/5] Importing accounts ...")
+        acc_stats = import_accounts(graph, acc_rows, dry_run=False)
+        if verbose:
+            print(f"      read={acc_stats.read} created={acc_stats.created} "
+                  f"updated={acc_stats.updated} rejected={acc_stats.rejected}")
 
-    if verbose:
-        print("[3/4] Importing transactions ...")
-    tx_stats = import_transactions(graph, tx_rows, dry_run)
-    if verbose:
-        print(f"      read={tx_stats.read} created={tx_stats.created} "
-              f"rejected={tx_stats.rejected}")
+        if verbose:
+            print("[3/5] Importing account transactions ...")
+        tx_stats = import_transactions(graph, tx_rows, dry_run=False)
+        if verbose:
+            print(f"      read={tx_stats.read} created={tx_stats.created} "
+                  f"updated={tx_stats.updated} rejected={tx_stats.rejected}")
 
-    if verbose:
-        print("[4/4] Importing alerts ...")
-    alert_stats = import_alerts(graph, alert_rows, dry_run)
-    if verbose:
-        print(f"      read={alert_stats.read} created={alert_stats.created} "
-              f"rejected={alert_stats.rejected}")
+        if verbose:
+            print("[4/5] Importing cash transactions ...")
+        cash_stats = import_cash_transactions(graph, cash_rows, dry_run=False)
+        if verbose:
+            print(f"      read={cash_stats.read} created={cash_stats.created} "
+                  f"updated={cash_stats.updated} rejected={cash_stats.rejected}")
 
-    # ---- 4. Summary ----
-    total_read = acc_stats.read + tx_stats.read + alert_stats.read
-    total_created = acc_stats.created + tx_stats.created + alert_stats.created
-    total_rejected = acc_stats.rejected + tx_stats.rejected + alert_stats.rejected
+        if verbose:
+            print("[5/5] Importing alerts ...")
+        alert_stats = import_alerts(graph, alert_rows, dry_run=False)
+        if verbose:
+            print(f"      read={alert_stats.read} created={alert_stats.created} "
+                  f"updated={alert_stats.updated} rejected={alert_stats.rejected}")
+
+    total_read = sum(
+        stats.read for stats in (
+            acc_stats, tx_stats, cash_stats, alert_stats
+        )
+    )
+    total_created = sum(
+        stats.created for stats in (
+            acc_stats, tx_stats, cash_stats, alert_stats
+        )
+    )
+    total_updated = sum(
+        stats.updated for stats in (
+            acc_stats, tx_stats, cash_stats, alert_stats
+        )
+    )
+    total_rejected = sum(
+        stats.rejected for stats in (
+            acc_stats, tx_stats, cash_stats, alert_stats
+        )
+    )
 
     result = ImportResult({
-        "success": True,
+        "success": total_rejected == 0,
         "dry_run": dry_run,
         "graph_name": GRAPH_NAME,
         "import_timestamp": datetime.now(timezone.utc).isoformat(),
         "total_read": total_read,
         "total_created": total_created,
+        "total_updated": total_updated,
         "total_rejected": total_rejected,
         "accounts_read": acc_stats.read,
         "accounts_created": acc_stats.created,
+        "accounts_updated": acc_stats.updated,
         "tx_read": tx_stats.read,
         "tx_created": tx_stats.created,
+        "tx_updated": tx_stats.updated,
+        "cash_transactions_read": cash_stats.read,
+        "cash_transactions_created": cash_stats.created,
+        "cash_transactions_updated": cash_stats.updated,
+        "transactions_total_read": tx_stats.read + cash_stats.read,
         "alerts_read": alert_stats.read,
         "alerts_created": alert_stats.created,
+        "alerts_updated": alert_stats.updated,
         "accounts": acc_stats.summary(),
         "transactions": tx_stats.summary(),
+        "cash_transactions": cash_stats.summary(),
         "alerts": alert_stats.summary(),
     })
 
     if verbose:
         print(f"\n{'='*60}")
-        status = "DRY RUN COMPLETE" if dry_run else "IMPORT COMPLETE"
-        print(f"{status}")
+        status = (
+            "DRY RUN COMPLETE" if dry_run
+            else "IMPORT COMPLETE" if result["success"]
+            else "IMPORT COMPLETED WITH REJECTIONS"
+        )
+        print(status)
         print(f"  Total records read:    {total_read}")
-        print(f"  Total created/upserted:{total_created}")
+        print(f"  Total created:         {total_created}")
+        print(f"  Total updated:         {total_updated}")
         print(f"  Total rejected:        {total_rejected}")
         if not dry_run:
             print(f"  Graph: {GRAPH_NAME}")

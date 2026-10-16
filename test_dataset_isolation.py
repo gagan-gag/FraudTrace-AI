@@ -174,16 +174,35 @@ class DatasetIsolationTests(unittest.TestCase):
             )
 
     def test_assistant_dataset_awareness(self):
-        # Demo assistant query
-        res_demo = investigate_question("ACC002", "Why is this account suspicious?", dataset_id="demo_synthetic")
-        self.assertEqual(res_demo["dataset_id"], "demo_synthetic")
-        self.assertIn("ACC002", res_demo["account_id"])
+        session_id = f"dataset-awareness-{uuid.uuid4().hex}"
+        try:
+            res_demo = investigate_question(
+                "ACC002",
+                "Why is this account suspicious?",
+                session_id=session_id,
+                dataset_id="demo_synthetic",
+            )
+            self.assertEqual(res_demo["dataset_id"], "demo_synthetic")
+            self.assertIn("ACC002", res_demo["account_id"])
 
-        # AML assistant query
-        res_aml = investigate_question("AML_ACC_25", "Why is this account suspicious?", dataset_id="ibm_amlsim")
-        self.assertEqual(res_aml["dataset_id"], "ibm_amlsim")
-        self.assertEqual(res_aml["account_id"], "AML_ACC_25")
-        self.assertIn("AMLSim", res_aml["warning"])
+            res_aml = investigate_question(
+                "AML_ACC_25",
+                "Why is this account suspicious?",
+                session_id=session_id,
+                dataset_id="ibm_amlsim",
+            )
+            self.assertEqual(res_aml["dataset_id"], "ibm_amlsim")
+            self.assertEqual(res_aml["account_id"], "AML_ACC_25")
+            self.assertIn("AMLSim", res_aml["warning"])
+        finally:
+            for dataset_id in ("demo_synthetic", "ibm_amlsim"):
+                get_graph(dataset_id).query(
+                    """
+                    MATCH (m:InvestigationMemory {session_id: $session_id})
+                    DETACH DELETE m
+                    """,
+                    params={"session_id": session_id},
+                )
 
 
 if __name__ == "__main__":

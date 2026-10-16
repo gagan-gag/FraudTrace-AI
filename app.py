@@ -135,10 +135,19 @@ def get_stats_for_dataset(dataset_id: str):
     """Retrieve statistics for a specific dataset."""
     try:
         valid_id = validate_dataset_id(dataset_id)
-        return get_graph_stats(valid_id)
+        stats = get_graph_stats(valid_id)
+        if "error" in stats:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Unable to query dataset stats: {stats['error']}",
+            )
+        return stats
 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -156,6 +165,15 @@ def import_amlsim_dataset(
         from amlsim_importer import run_import
 
         stats = run_import(dry_run=dry_run)
+        if not stats.get("success"):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "AMLSim import validation or row processing failed.",
+                    "validation_errors": stats.get("validation_errors", []),
+                    "total_rejected": stats.get("total_rejected", 0),
+                },
+            )
 
         return {
             "status": "success",
@@ -164,13 +182,24 @@ def import_amlsim_dataset(
             "stats": {
                 "accounts_read": stats.accounts_read,
                 "accounts_created": stats.accounts_created,
+                "accounts_updated": stats.accounts_updated,
                 "tx_read": stats.tx_read,
                 "tx_created": stats.tx_created,
+                "tx_updated": stats.tx_updated,
+                "cash_transactions_read": stats.cash_transactions_read,
+                "cash_transactions_created": stats.cash_transactions_created,
+                "cash_transactions_updated": stats.cash_transactions_updated,
                 "alerts_read": stats.alerts_read,
                 "alerts_created": stats.alerts_created,
+                "alerts_updated": stats.alerts_updated,
+                "total_created": stats.total_created,
+                "total_updated": stats.total_updated,
                 "total_rejected": stats.total_rejected,
             },
         }
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
@@ -195,7 +224,13 @@ def investigate(
         raise HTTPException(status_code=400, detail=str(exc))
 
     account_id = account_id.strip().upper()
-    target_graph = get_graph(dataset_id)
+    try:
+        target_graph = get_graph(dataset_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Unable to connect to dataset '{dataset_id}': {exc}",
+        ) from exc
 
     if dataset_id == "demo_synthetic":
         direct_query = """
@@ -288,11 +323,27 @@ def investigate(
                 ],
             })
 
+        try:
+            connection_details = detect_connected_accounts(
+                account_id,
+                dataset_id=dataset_id,
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Unable to retrieve connected-account details: {exc}",
+            ) from exc
+
         return {
             "account_id": row[0],
             "dataset_id": dataset_id,
             "risk_label": row[1] or "UNKNOWN",
             "related_accounts": row[2] or [],
+            "details": (
+                connection_details.get("related_accounts", [])
+                if connection_details
+                else []
+            ),
             "shared_devices": row[3] or [],
             "multi_hop_paths": paths,
             "multi_hop_path_count": len(paths),
@@ -312,10 +363,16 @@ def investigate(
         }
 
     elif dataset_id == "ibm_amlsim":
-        conn_result = detect_connected_accounts(
-            account_id,
-            dataset_id="ibm_amlsim",
-        )
+        try:
+            conn_result = detect_connected_accounts(
+                account_id,
+                dataset_id="ibm_amlsim",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Unable to query IBM AMLSim account evidence: {exc}",
+            ) from exc
 
         if conn_result is None:
             raise HTTPException(
@@ -392,6 +449,8 @@ def account_evidence(
             "transactions": ev["transactions"],
             "transaction_count": ev["transaction_count"],
             "flagged_transaction_count": ev["flagged_transaction_count"],
+            "alerts": ev.get("alerts", []),
+            "alert_count": ev.get("alert_count", 0),
             "source": ev.get("source"),
             "warning": meta.get("disclaimer", ""),
         }
@@ -424,7 +483,13 @@ def get_account_graph(
         raise HTTPException(status_code=400, detail=str(exc))
 
     account_id = account_id.strip().upper()
-    target_graph = get_graph(dataset_id)
+    try:
+        target_graph = get_graph(dataset_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Unable to connect to dataset '{dataset_id}': {exc}",
+        ) from exc
 
     acc_label = (
         "AMLAccount"
@@ -698,6 +763,23 @@ def ask_investigation(request: AskRequest):
             raise HTTPException(
                 status_code=404,
                 detail=f"Account {account_id} was not found.",
+            )
+        if result.get("error"):
+            raise HTTPException(
+                status_code=503,
+                detail=f"The investigation assistant failed: {result['error']}",
+            )
+        if any(
+            step.get("step") == "account_lookup"
+            and step.get("status") == "account_not_found"
+            for step in result.get("investigation_steps", [])
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"Account {account_id} was not found in dataset "
+                    f"'{dataset_id}'."
+                ),
             )
 
         return result
