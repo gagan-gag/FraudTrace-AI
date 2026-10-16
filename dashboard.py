@@ -45,7 +45,14 @@ from export_case_report import build_report, get_json, post_json
 # CONFIGURATION & THEME
 # ============================================================
 
-API_URL = "http://127.0.0.1:8010"
+
+import os
+
+API_URL = os.getenv(
+    "API_BASE_URL",
+    "http://127.0.0.1:8010"
+).rstrip("/")
+
 
 st.set_page_config(
     page_title="FraudTrace AI — Graph-Powered Fraud Investigation",
