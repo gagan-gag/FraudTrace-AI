@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 from falkordb import FalkorDB
 
 from ai_assistant import investigate_question
+from case_memory import get_recent_investigation_memories
 
 
 # ============================================================
@@ -14,9 +15,10 @@ app = FastAPI(
     title="FraudTrace AI",
     description=(
         "Graph-powered fraud investigation using FalkorDB. "
-        "Uses synthetic demonstration data."
+        "Uses synthetic demonstration data and persistent "
+        "investigation memory."
     ),
-    version="0.5.0",
+    version="0.6.0",
 )
 
 
@@ -38,7 +40,7 @@ class AskRequest(BaseModel):
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH CHECK AND API INFORMATION
 # ============================================================
 
 @app.get("/")
@@ -47,13 +49,14 @@ def home():
         "project": "FraudTrace AI",
         "status": "running",
         "database": "FalkorDB",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "endpoints": [
             "/",
             "/health",
             "/investigate/{account_id}",
             "/account-evidence/{account_id}",
             "/graph/{account_id}?hops=2",
+            "/case-history/{account_id}?limit=10",
             "/ask",
             "/docs",
         ],
@@ -163,7 +166,10 @@ def investigate(account_id: str):
             ],
             "evidence": [
                 f"{start} and {intermediary} share device {device}",
-                f"{intermediary} and {connected} share IP address {shared_ip}",
+                (
+                    f"{intermediary} and {connected} share "
+                    f"IP address {shared_ip}"
+                ),
             ],
         })
 
@@ -242,7 +248,8 @@ def account_evidence(account_id: str):
     ]
 
     flagged_count = sum(
-        1 for item in transactions
+        1
+        for item in transactions
         if item.get("status") == "flagged"
     )
 
@@ -269,14 +276,13 @@ def get_account_graph(
     hops: int = Query(default=2, ge=1, le=3),
 ):
     """
-    Return actual FalkorDB nodes and relationships reachable from
-    the requested account within the specified hop limit.
+    Return FalkorDB nodes and relationships reachable from an
+    account within the requested hop limit.
     """
 
     account_id = account_id.strip().upper()
 
     try:
-        # Verify that the root account exists.
         check = graph.query(
             """
             MATCH (a:Account {id: $account_id})
@@ -291,8 +297,6 @@ def get_account_graph(
                 detail=f"Account {account_id} was not found.",
             )
 
-        # The upper path bound is fixed at three. The requested depth
-        # is applied as a parameter, preventing unbounded traversals.
         query = """
             MATCH (root:Account {id: $account_id})
             MATCH path = (root)-[*1..3]-(neighbor)
@@ -407,18 +411,99 @@ def get_account_graph(
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="Unable to retrieve the multi-hop graph from FalkorDB.",
+            detail=(
+                "Unable to retrieve the multi-hop graph from FalkorDB."
+            ),
         ) from exc
 
 
 # ============================================================
-# AI INVESTIGATION ASSISTANT
+# CASE HISTORY — PERSISTENT INVESTIGATION MEMORY
+# ============================================================
+
+@app.get("/case-history/{account_id}")
+def get_case_history(
+    account_id: str,
+    limit: int = Query(default=10, ge=1, le=50),
+    session_id: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=100,
+    ),
+):
+    """
+    Retrieve recent historical investigation observations.
+
+    Memories provide context only. They are not independently verified
+    evidence and must not automatically affect risk assessments.
+    """
+
+    account_id = account_id.strip().upper()
+
+    if session_id is not None:
+        session_id = session_id.strip()
+
+        if not session_id:
+            raise HTTPException(
+                status_code=422,
+                detail="session_id cannot be blank.",
+            )
+
+    try:
+        result = get_recent_investigation_memories(
+            account_id=account_id,
+            limit=limit,
+            session_id=session_id,
+        )
+
+        if not isinstance(result, dict):
+            raise HTTPException(
+                status_code=503,
+                detail="The case-history service returned an invalid response.",
+            )
+
+        return {
+            **result,
+            "warning": (
+                "Historical investigation memories are unverified "
+                "observations. Review current graph evidence before "
+                "drawing conclusions."
+            ),
+        }
+
+    except HTTPException:
+        raise
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Unable to retrieve case history from FalkorDB.",
+        ) from exc
+
+
+# ============================================================
+# INVESTIGATION ASSISTANT
 # ============================================================
 
 @app.post("/ask")
 def ask_investigation(request: AskRequest):
     account_id = request.account_id.strip().upper()
     question = request.question.strip()
+
+    if not account_id or not question:
+        raise HTTPException(
+            status_code=422,
+            detail="Account ID and question cannot be blank.",
+        )
 
     try:
         result = investigate_question(
@@ -439,5 +524,7 @@ def ask_investigation(request: AskRequest):
     except Exception as exc:
         raise HTTPException(
             status_code=503,
-            detail="The investigation assistant could not complete the request.",
+            detail=(
+                "The investigation assistant could not complete the request."
+            ),
         ) from exc
