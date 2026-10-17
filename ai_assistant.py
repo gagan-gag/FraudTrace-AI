@@ -84,6 +84,12 @@ def _reference_token(value: Any) -> str:
     return token.strip("-_")[:80] or "UNKNOWN"
 
 
+def alert_display_description(check_name: Any) -> str:
+    """Create a readable alert description without changing source evidence."""
+    check = " ".join(str(check_name or "").replace("_", " ").split())
+    return f"{check.title()} pattern alert" if check else "AML alert"
+
+
 def _add_evidence_reference(
     evidence_type: str,
     item: dict[str, Any],
@@ -147,7 +153,10 @@ def _build_evidence_reference_index(
         elif item.get("type") == "alert":
             entry.update({
                 "alert_id": item.get("alert_id"),
+                "display_description": item.get("display_description"),
+                "alert_text": item.get("alert_text"),
                 "check_name": item.get("check_name"),
+                "pattern": item.get("pattern"),
                 "event_date": item.get("event_date"),
                 "merchant_id": item.get("merchant_id"),
                 "direction": item.get("direction"),
@@ -300,7 +309,7 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
             WITH a, collect(DISTINCT {
                 transaction_id: tx_out.id,
                 amount: tx_out.amount,
-                status: CASE WHEN a.is_fraud OR (cp_out IS NOT NULL AND cp_out.is_fraud) THEN 'flagged' ELSE 'normal' END,
+                status: tx_out.status,
                 direction: 'sent',
                 counterparty: cp_out.id,
                 source_type: tx_out.source_type,
@@ -314,7 +323,7 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
             WITH a, sent_txns, collect(DISTINCT {
                 transaction_id: tx_in.id,
                 amount: tx_in.amount,
-                status: CASE WHEN cp_in.is_fraud OR a.is_fraud THEN 'flagged' ELSE 'normal' END,
+                status: tx_in.status,
                 direction: 'received',
                 counterparty: cp_in.id,
                 source_type: tx_in.source_type,
@@ -377,6 +386,7 @@ def get_transaction_evidence(account_id: str, dataset_id: str = "demo_synthetic"
                 "alert_text": alert[2],
                 "customer_id": alert[3],
                 "check_name": alert[4],
+                "display_description": alert_display_description(alert[4]),
                 "pattern": alert[5],
                 "event_date": alert[6],
                 "organization_type": alert[7],
@@ -606,7 +616,7 @@ def _answer_with_llm(
                 for alert in alerts:
                     summary_lines.append(
                         f"  • {alert.get('alert_id')} "
-                        f"(check: {alert.get('check_name') or 'unknown'}, "
+                        f"({alert.get('display_description') or alert.get('check_name') or 'unknown'}, "
                         f"date: {alert.get('event_date') or 'unknown'}, "
                         f"escalated: {bool(alert.get('escalated'))}) "
                         f"[EV-ALERT-{alert.get('alert_id')}]"

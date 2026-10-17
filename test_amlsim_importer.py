@@ -7,7 +7,8 @@ Tests CSV parsing, column validation, dry-run mode, and idempotency.
 import unittest
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from dataset_registry import get_graph, get_graph_stats
 from amlsim_importer import (
@@ -119,6 +120,87 @@ class AMLSimImporterTests(unittest.TestCase):
         self.assertTrue(evidence["found"])
         self.assertEqual(evidence["alert_count"], 1)
         self.assertEqual(evidence["alerts"][0]["alert_id"], "AML_ALERT_0")
+
+    def test_fraud_labels_do_not_flag_simulated_transactions(self):
+        sent_transactions = [
+            {
+                "transaction_id": "AML_TXN_1",
+                "amount": 10,
+                "status": "simulated",
+                "direction": "sent",
+                "counterparty": "AML_ACC_2",
+            },
+            {
+                "transaction_id": "AML_TXN_2",
+                "amount": 20,
+                "status": "simulated",
+                "direction": "sent",
+                "counterparty": "AML_ACC_3",
+            },
+            {
+                "transaction_id": "AML_TXN_3",
+                "amount": 30,
+                "status": "flagged",
+                "direction": "sent",
+                "counterparty": "AML_ACC_4",
+            },
+        ]
+        graph = SimpleNamespace(
+            query=Mock(
+                side_effect=[
+                    SimpleNamespace(
+                        result_set=[
+                            (
+                                "AML_ACC_1",
+                                True,
+                                False,
+                                sent_transactions,
+                                [],
+                            )
+                        ]
+                    ),
+                    SimpleNamespace(
+                        result_set=[
+                            (
+                                "AML_ALERT_0",
+                                "0",
+                                "1",
+                                "25",
+                                "cycle",
+                                "cycle",
+                                "2017-02-18",
+                                "INDIVIDUAL",
+                                True,
+                            )
+                        ]
+                    ),
+                ]
+            )
+        )
+
+        with patch("ai_assistant.get_graph", return_value=graph):
+            evidence = get_transaction_evidence(
+                "AML_ACC_1",
+                "ibm_amlsim",
+            )
+
+        self.assertEqual(
+            [item["status"] for item in evidence["transactions"]],
+            ["simulated", "simulated", "flagged"],
+        )
+        self.assertEqual(evidence["flagged_transaction_count"], 1)
+        self.assertEqual(
+            evidence["alerts"][0]["display_description"],
+            "Cycle pattern alert",
+        )
+        self.assertEqual(evidence["alerts"][0]["alert_text"], "1")
+        self.assertEqual(evidence["alerts"][0]["check_name"], "cycle")
+        self.assertEqual(evidence["alerts"][0]["pattern"], "cycle")
+
+        transaction_query = graph.query.call_args_list[0].args[0]
+        self.assertIn("status: tx_out.status", transaction_query)
+        self.assertIn("status: tx_in.status", transaction_query)
+        self.assertNotIn("CASE WHEN", transaction_query)
 
 
 if __name__ == "__main__":

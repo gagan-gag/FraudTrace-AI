@@ -34,6 +34,7 @@ import requests
 import streamlit as st
 
 from export_case_report import build_report, get_json, post_json
+from ai_assistant import alert_display_description
 
 # ============================================================
 # CONFIGURATION & THEME
@@ -1472,8 +1473,15 @@ if selected_view == "Investigation":
                     if alert_nodes:
                         for al in alert_nodes:
                             al_id = al["id"]
-                            pat = al.get("properties", {}).get("pattern", "Alert")
-                            st.markdown(f"<div class='entity-row'><b>🚨 {al_id}</b> <span style='font-size:11px; color:#64748B;'>{pat}</span></div>", unsafe_allow_html=True)
+                            props = al.get("properties", {})
+                            description = alert_display_description(
+                                props.get("check_name") or props.get("pattern")
+                            )
+                            st.markdown(f"<div class='entity-row'><b>🚨 {al_id}</b> <span style='font-size:11px; color:#64748B;'>{description}</span></div>", unsafe_allow_html=True)
+                            if props.get("alert_text"):
+                                st.caption(
+                                    f"Source alert text: {props['alert_text']}"
+                                )
                     else:
                         st.caption("No AML alerts in graph.")
 
@@ -1628,6 +1636,9 @@ if selected_view == "Investigation":
                             seen_alerts.add(al_id)
                             props = al.get("properties", {})
                             pat = props.get("pattern", "cycle")
+                            display_description = alert_display_description(
+                                props.get("check_name") or pat
+                            )
                             date_str = props.get("event_date", "—")
                             is_direct = al_id in direct_alert_ids
 
@@ -1638,7 +1649,7 @@ if selected_view == "Investigation":
                                 <div class="entity-row">
                                     <div>
                                         <b>🚨 {al_id}</b><br>
-                                        <span style="font-size:10px; color:#64748B;">Check: <b>{pat}</b> · Date: {date_str} · Escalated: {bool(props.get('escalated'))}</span>
+                                        <span style="font-size:10px; color:#64748B;"><b>{display_description}</b> · Date: {date_str} · Escalated: {bool(props.get('escalated'))}</span>
                                     </div>
                                     {badge}
                                 </div>
@@ -1646,7 +1657,7 @@ if selected_view == "Investigation":
                                 unsafe_allow_html=True,
                             )
                             if props.get("alert_text"):
-                                st.caption(props["alert_text"])
+                                st.caption(f"Source alert text: {props['alert_text']}")
                         for al_id in direct_alert_ids:
                             if al_id not in seen_alerts:
                                 st.markdown(
@@ -1838,7 +1849,7 @@ if selected_view == "Investigation":
                 for alert in alerts:
                     findings_bullets.append(
                         f"Alert {alert.get('alert_id')} is linked to this account "
-                        f"(check: {alert.get('check_name') or 'unknown'}; "
+                        f"({alert.get('display_description') or alert.get('check_name') or 'unknown'}; "
                         f"date: {alert.get('event_date') or 'unknown'})."
                     )
             else:
