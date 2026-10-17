@@ -424,7 +424,7 @@ Set configuration in the process environment or a local `.env` file. `.env` is i
 |---|---|---|
 | `FALKORDB_HOST`, `FALKORDB_PORT` | Backend | FalkorDB connection; defaults to local host and port |
 | `FALKORDB_USERNAME`, `FALKORDB_PASSWORD` | Backend | Optional FalkorDB authentication |
-| `API_BASE_URL` | Dashboard and API scripts | Backend base URL; defaults to local FastAPI |
+| `API_BASE_URL` | Dashboard and API scripts | Backend base URL; dashboard defaults to the hosted Render backend, while API scripts default to local FastAPI |
 | `FRAUDTRACE_IMPORT_API_KEY` | Backend only | Required bearer secret for `POST /import-amlsim`; no default |
 | `FRAUDTRACE_LLM_API_KEY` or `OPENAI_API_KEY` | Assistant | Optional provider credential; values must remain secret |
 | `FRAUDTRACE_LLM_BASE_URL` | Assistant | Optional OpenAI-compatible API base URL |
@@ -510,7 +510,7 @@ streamlit run dashboard.py
 The Streamlit UI opens automatically in your browser at:
 - Dashboard: [http://localhost:8501](http://localhost:8501)
 
-The dashboard reads `API_BASE_URL` to locate FastAPI and defaults to `http://127.0.0.1:8010` for local development. For a hosted Streamlit dashboard, set `API_BASE_URL` in the frontend provider's environment settings to `https://fraudtrace-ai-backend.onrender.com` (without a trailing slash). Set this variable only for the frontend; configure FalkorDB credentials on the backend provider.
+The dashboard reads `API_BASE_URL` to locate FastAPI and defaults to `https://fraudtrace-ai-backend.onrender.com`. In the devcontainer, `API_BASE_URL` is set to `http://127.0.0.1:8010` so the dashboard targets a backend running locally in that container; Streamlit's CORS and XSRF protections remain at their secure defaults. For local PowerShell development outside the devcontainer, set `$env:API_BASE_URL = "http://127.0.0.1:8010"` before running `streamlit run dashboard.py`. For the hosted Streamlit dashboard, configure `API_BASE_URL` in the frontend provider's environment settings to `https://fraudtrace-ai-backend.onrender.com` (without a trailing slash). `API_BASE_URL` is a service URL, not a credential; keep backend secrets out of the frontend and configure FalkorDB credentials on the backend provider.
 
 ### Using the Multi-Dataset Dashboard
 1. Use the **Dataset Selector** in the sidebar to switch between `FraudTrace AI Demo (Synthetic)` and `IBM AMLSim (Transaction Network)`.

@@ -14,7 +14,38 @@ class AssistantSafetyTests(unittest.TestCase):
         )
 
         self.assertIn("transaction_evidence", plan["selected_tools"])
+        self.assertEqual(plan["requested_sections"], ["alerts"])
         self.assertEqual(plan["intent"], "alert_review")
+
+    def test_linked_account_questions_select_network_evidence(self):
+        plan = ai_assistant.plan_investigation(
+            "Show me the linked accounts."
+        )
+
+        self.assertEqual(
+            plan["selected_tools"],
+            ["connected_account_signals"],
+        )
+        self.assertEqual(
+            plan["requested_sections"],
+            ["connected_accounts"],
+        )
+        self.assertEqual(plan["intent"], "network_investigation")
+
+    def test_risk_questions_keep_broad_evidence_and_risk_intent(self):
+        plan = ai_assistant.plan_investigation(
+            "Why should this account be reviewed?"
+        )
+
+        self.assertEqual(
+            plan["selected_tools"],
+            ["connected_account_signals", "transaction_evidence"],
+        )
+        self.assertEqual(
+            plan["requested_sections"],
+            ["connected_accounts", "transactions", "alerts"],
+        )
+        self.assertEqual(plan["intent"], "risk_review")
 
     def test_alert_records_are_returned_as_referenced_evidence(self):
         graph = Mock()
@@ -206,6 +237,15 @@ class AssistantSafetyTests(unittest.TestCase):
                 "transactions": [],
                 "alerts": [],
             },
+            "selected_tools": [
+                "connected_account_signals",
+                "transaction_evidence",
+            ],
+            "requested_sections": [
+                "connected_accounts",
+                "transactions",
+                "alerts",
+            ],
         }
 
         with patch("ai_assistant._llm_configuration", return_value=None):

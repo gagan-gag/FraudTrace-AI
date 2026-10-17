@@ -221,7 +221,7 @@ def plan_investigation(question: str) -> dict[str, Any]:
     asks_risk = any(term in normalized for term in RISK_TERMS)
 
     focus_count = sum((asks_network, asks_transactions, asks_alerts))
-    if asks_risk or not focus_count:
+    if not focus_count:
         tools = [
             "connected_account_signals",
             "transaction_evidence",
@@ -235,7 +235,7 @@ def plan_investigation(question: str) -> dict[str, Any]:
         if asks_transactions or asks_alerts:
             tools.append("transaction_evidence")
 
-    if asks_risk or not focus_count:
+    if not focus_count:
         requested_sections = [
             "connected_accounts",
             "transactions",
@@ -250,7 +250,7 @@ def plan_investigation(question: str) -> dict[str, Any]:
         if asks_alerts:
             requested_sections.append("alerts")
 
-    if asks_risk:
+    if asks_risk and not focus_count:
         intent = "risk_review"
     elif focus_count > 1:
         intent = "combined_investigation"
