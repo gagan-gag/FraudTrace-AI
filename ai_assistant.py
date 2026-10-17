@@ -187,7 +187,7 @@ NETWORK_TERMS = (
     "network", "device", "devices", "ip", "address", "shared",
     "connection", "connections", "path", "paths", "multi-hop",
     "multihop", "linked", "link", "neighbor", "neighbour",
-    "counterparty", "counterparties", "aml", "alert", "alerts",
+    "counterparty", "counterparties", "aml",
 )
 
 TRANSACTION_TERMS = (
@@ -196,6 +196,8 @@ TRANSACTION_TERMS = (
     "spent", "purchase", "purchases", "total value", "how much",
     "send", "sent", "receive", "received", "transfer", "transfers",
 )
+
+ALERT_TERMS = ("alert", "alerts")
 
 RISK_TERMS = (
     "suspicious", "suspicion", "fraud", "risk", "why",
@@ -212,9 +214,10 @@ def plan_investigation(question: str) -> dict[str, Any]:
     asks_transactions = any(
         term in normalized for term in TRANSACTION_TERMS
     )
+    asks_alerts = any(term in normalized for term in ALERT_TERMS)
     asks_risk = any(term in normalized for term in RISK_TERMS)
 
-    if asks_risk or not (asks_network or asks_transactions):
+    if asks_risk or not (asks_network or asks_transactions or asks_alerts):
         tools = [
             "connected_account_signals",
             "transaction_evidence",
@@ -225,11 +228,12 @@ def plan_investigation(question: str) -> dict[str, Any]:
         if asks_network:
             tools.append("connected_account_signals")
 
-        if asks_transactions:
+        if asks_transactions or asks_alerts:
             tools.append("transaction_evidence")
 
     intent = (
         "risk_review" if asks_risk
+        else "alert_review" if asks_alerts
         else "network_investigation" if asks_network
         else "transaction_review" if asks_transactions
         else "general_investigation"
@@ -599,6 +603,10 @@ def _answer_with_llm(
                         f"  • {acc}{is_f} (Priority: {r.get('review_priority', 'REVIEW')}) [EV-LINK-{acc}]: "
                         f"signals ({signals}), sent txns ({sent}), received txns ({recv}), shared alerts ({alerts})"
                     )
+            elif conn_ev.get("found"):
+                summary_lines.append(
+                    "- No connected AML counterparties were found."
+                )
 
             if txns:
                 flagged = [t for t in txns if str(t.get("status", "")).lower() == "flagged"]
@@ -610,6 +618,10 @@ def _answer_with_llm(
                         f"  • {t.get('transaction_id')} [{dir_label}]: amount ${t.get('amount')}, "
                         f"counterparty {cp} [EV-TXN-{t.get('transaction_id')}]"
                     )
+            elif tx_ev.get("found"):
+                summary_lines.append(
+                    "- No transactions were found for this account."
+                )
 
             if alerts:
                 summary_lines.append(f"- Alerts linked to this account: {len(alerts)}.")
@@ -621,6 +633,10 @@ def _answer_with_llm(
                         f"escalated: {bool(alert.get('escalated'))}) "
                         f"[EV-ALERT-{alert.get('alert_id')}]"
                     )
+            elif tx_ev.get("found"):
+                summary_lines.append(
+                    "- No alerts were found linked to this account."
+                )
 
             summary_lines.append(
                 "\nNote: IBM AMLSim is simulation data; its labels are not "
@@ -644,6 +660,10 @@ def _answer_with_llm(
                         f"  • {acc} (Priority: {r.get('review_priority', 'REVIEW')}) [EV-LINK-{acc}]: "
                         f"shared devices ({devices}), shared IPs ({ips}), common merchants ({merchants})"
                     )
+            elif conn_ev.get("found"):
+                summary_lines.append(
+                    "- No connected accounts were found."
+                )
 
             if txns:
                 flagged = [t for t in txns if str(t.get("status", "")).lower() == "flagged"]
@@ -654,6 +674,10 @@ def _answer_with_llm(
                         f"  • {t.get('transaction_id')} [{status_label}]: amount {t.get('amount')}, "
                         f"merchant {t.get('merchant_id')} [EV-TXN-{t.get('transaction_id')}]"
                     )
+            elif tx_ev.get("found"):
+                summary_lines.append(
+                    "- No transactions were found for this account."
+                )
 
             summary_lines.append(
                 "\nNote: AI LLM is operating in graph-evidence mode. All conclusions are directly grounded in current FalkorDB records."
@@ -850,6 +874,7 @@ def investigate_question(
     question: str,
     session_id: str = "default",
     dataset_id: str = "demo_synthetic",
+    include_previous_memories: bool = True,
 ) -> dict[str, Any]:
     """
     Retrieve current evidence and prior memories, generate an answer,
@@ -953,23 +978,28 @@ def investigate_question(
             r_row = account_check.result_set[0]
             risk_label = "HIGH (isFraud=True)" if r_row[1] else "MEDIUM (suspicious=True)" if r_row[2] else "LOW"
 
-        # Load prior memories, scoped to this account, session, and dataset.
-        try:
-            memory_result = get_recent_investigation_memories(
-                account_id=account_id,
-                limit=MAX_MEMORY_ITEMS,
-                session_id=session_id,
-                dataset_id=dataset_id,
-            )
-            previous_memories = memory_result.get("memories", [])
+        if include_previous_memories:
+            try:
+                memory_result = get_recent_investigation_memories(
+                    account_id=account_id,
+                    limit=MAX_MEMORY_ITEMS,
+                    session_id=session_id,
+                    dataset_id=dataset_id,
+                )
+                previous_memories = memory_result.get("memories", [])
+                steps.append({
+                    "step": "retrieve_previous_memories",
+                    "status": "completed",
+                })
+            except Exception:
+                steps.append({
+                    "step": "retrieve_previous_memories",
+                    "status": "failed",
+                })
+        else:
             steps.append({
                 "step": "retrieve_previous_memories",
-                "status": "completed",
-            })
-        except Exception:
-            steps.append({
-                "step": "retrieve_previous_memories",
-                "status": "failed",
+                "status": "skipped_unverified_identity",
             })
 
         # Retrieve only the evidence tools selected for this question.
@@ -1086,8 +1116,8 @@ def investigate_question(
                     "completed" if memory_saved else "failed"
                 ),
             })
-        except Exception as exc:
-            memory_save_error = str(exc)
+        except Exception:
+            memory_save_error = "Unable to save the investigation memory."
             steps.append({
                 "step": "save_investigation_memory",
                 "status": "failed",

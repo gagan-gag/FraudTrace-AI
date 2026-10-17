@@ -3,13 +3,17 @@
 
 **Connect the evidence. Investigate the pattern. Keep the decision human.**
 
-FraudTrace AI is a graph-powered investigation platform designed to help analysts explore suspicious transaction activity, identify relationships between accounts, inspect connected infrastructure, and generate structured case reports.
+**Live application:** [Open FraudTrace AI](https://fraudtrace-ai-r6hopnhtksi98bbtrsublj.streamlit.app/)<br>
+**Backend health:** [Check API health](https://fraudtrace-ai-backend.onrender.com/health)<br>
+**Source repository:** [gagan-gag/FraudTrace-AI](https://github.com/gagan-gag/FraudTrace-AI)
 
-Instead of examining transactions in isolation, FraudTrace AI uses **FalkorDB** to represent and traverse relationships between accounts, devices, IP addresses, transactions, and merchants.
+FraudTrace AI is a graph-powered investigation platform designed to help analysts explore suspicious transaction activity, identify relationships between accounts, inspect connected entities, and generate structured case reports. It supports two separate synthetic datasets: the FraudTrace demonstration graph and IBM AMLSim simulation data.
 
-Investigators can explore graph neighborhoods at different depths, review supporting evidence, receive deterministic investigation summaries, and export PDF reports.
+Instead of examining transactions in isolation, FraudTrace AI uses **FalkorDB** to represent and traverse relationships between accounts, devices, IP addresses, transactions, merchants, branches, and AML alerts where those entities exist in the selected dataset.
 
-> **Important:** This project uses synthetic demonstration data. Investigation findings are leads for human review, not proof of fraud. The assistant retrieves graph evidence and uses deterministic question routing, with optional Groq/OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the supporting evidence.
+Investigators can explore graph neighborhoods, review supporting evidence, receive deterministic or optionally language-model-assisted summaries, and export PDF reports.
+
+> **Important:** Both included datasets are synthetic: the FraudTrace demonstration data and the IBM AMLSim simulation data. Investigation findings are leads for human review, not proof of fraud. The assistant retrieves graph evidence and uses deterministic question routing, with optional OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the supporting evidence.
 
 ---
 
@@ -31,8 +35,6 @@ Investigators can explore graph neighborhoods at different depths, review suppor
 - [Testing](#testing)
 - [Example Investigation](#example-investigation)
 - [Responsible Use and Limitations](#responsible-use-and-limitations)
-- [Demo Walkthrough](#demo-walkthrough)
-- [Hackathon Submission Checklist](#hackathon-submission-checklist)
 - [Future Improvements](#future-improvements)
 - [Acknowledgements](#acknowledgements)
 
@@ -75,17 +77,17 @@ The goal is to make connected evidence easier to explore and explain while keepi
 ### 1. Graph-Powered Investigation with FalkorDB
 Uses FalkorDB to store entities and relationships and retrieve connected graph neighborhoods.
 
-### 2. Interactive 3D Molecular Network Visualization
-Renders genuine 3D molecular networks where nodes are spherical 'atoms' and edges are chemical 'bonds' with relationship-coded colors, smooth 3D orbit rotation, zoom, pan, and responsive layout modes (3D Molecular, 2D Force-Directed, 3D Spherical Orbit).
+### 2. Interactive Graph Visualization
+Uses Plotly and NetworkX to display graph entities and relationships with interactive 2D force-directed and 3D layouts, including zoom, pan, focus selection, and entity filters.
 
-### 3. Real Multi-Hop Path Finder
-Discovers and traces genuine multi-hop paths between any two entities in FalkorDB (e.g. Account → Device → Account, Account → IPAddress → Account, Account → Transaction → Merchant) with ordered step visualization and supporting evidence references.
+### 3. Multi-Hop Path Finder
+Discovers and traces paths between entities in FalkorDB (e.g. Account → Device → Account, Account → IPAddress → Account, Account → Transaction → Merchant) with ordered step visualization and supporting evidence references.
 
-### 4. Suspicious Cluster & Ring Detection
-Discovers multi-account clusters sharing infrastructure (devices, IP addresses, merchants) with explainable heuristic risk scoring and flagged transaction breakdowns.
+### 4. Connected-Account Clusters
+Finds connected account groups using dataset-specific relationships and reports heuristic review priorities. These priorities are not calibrated fraud probabilities.
 
 ### 5. Connected-Account Signals
-Identifies relationships involving shared devices, IP addresses, and merchants with transparent review priorities (HIGH, MEDIUM, REVIEW).
+Identifies shared-device, shared-IP, and shared-merchant relationships in the demo graph; AMLSim uses transaction counterparties and alerts. Review priorities are heuristic labels (HIGH, MEDIUM, REVIEW).
 
 ### 6. Transaction Evidence
 Retrieves transaction details, merchant associations, amounts, and transaction status with UTF-8 safe currency formatting.
@@ -97,10 +99,10 @@ Produces structured investigation summaries using available graph evidence, with
 Stores investigation observations in FalkorDB linked to accounts (`:HAS_INVESTIGATION_MEMORY`), enabling cross-session recall and search across sessions.
 
 ### 9. PDF Case Report Generation
-Exports comprehensive investigation findings, related accounts, transaction evidence, graph details, assistant output, and audit notes into court-ready PDFs.
+Exports investigation findings, related accounts, transaction evidence, graph details, assistant output, and report notes into a PDF for review. The report is not certified forensic evidence and is not represented as court-ready.
 
 ### 10. Multi-Dataset Support & Dataset Isolation
-Allows seamless switching between synthetic demonstration data (`demo_synthetic` graph: `FraudTrace`) and real-world-style transaction networks (`ibm_amlsim` graph: `ibm_amlsim`). Strict server-side allowlisting guarantees complete graph isolation and prevents cross-contamination.
+Allows switching between the FraudTrace synthetic demonstration graph (`demo_synthetic`, graph `FraudTrace`) and IBM AMLSim synthetic simulation data (`ibm_amlsim`, graph `ibm_amlsim`). A server-side allowlist selects the supported graph for each request; dataset-isolation tests cover separation between the two graphs.
 
 ### 11. Automated Test Suite
 Includes unit, graph-isolation, AMLSim import, PDF report, and API smoke checks.
@@ -114,12 +116,13 @@ FraudTrace AI supports two distinct graph datasets simultaneously:
 | Dataset ID | Graph Name | Focus & Characteristics | Key Entities & Labels | Recommended Starting Account |
 |---|---|---|---|---|
 | `demo_synthetic` | `FraudTrace` | Synthetic fraud ring with shared infrastructure signals | `Account`, `Device`, `IPAddress`, `Merchant`, `Transaction` | `ACC002` (Shares device with `ACC001`) |
-| `ibm_amlsim` | `ibm_amlsim` | Synthetic AMLSim network with transfers, cash activity, branches, and alerts | `AMLAccount`, `AMLTransaction`, `AMLAlert`, `AMLBranch` | `AML_ACC_25` (Has alert `AML_ALERT_0`) |
+| `ibm_amlsim` | `ibm_amlsim` | Synthetic IBM AMLSim simulation with transfers, cash activity, branches, and alerts; not real-world transactions | `AMLAccount`, `AMLTransaction`, `AMLAlert`, `AMLBranch` | `AML_ACC_25` (linked to alert `AML_ALERT_0`) |
 
-### Key Guarantees:
-1. **Server-Side Allowlist**: Controlled via `DATASET_ALLOWLIST = frozenset({"demo_synthetic", "ibm_amlsim"})` in [dataset_registry.py](file:///d:/PROJECTS/FraudTrace%20AI/dataset_registry.py). Arbitrary graph names are strictly rejected with HTTP 400.
-2. **Schema Preservation**: The AMLSim dataset does not invent fake device/IP entities. Account transfers use `AML_SENT` and `AML_RECEIVED`; cash transactions link the account to an `AMLTransaction`, which records its branch and links to an `AMLBranch` using `AML_AT_BRANCH`. Alerts link to their source account using `HAS_ALERT`.
-3. **Investigation Assistant Awareness**: The assistant explicitly informs the investigator of the active dataset and adapts its traversal logic accordingly.
+### Dataset distinctions
+1. **Dataset selection**: The API validates dataset IDs against its allowlist before selecting the corresponding graph. Arbitrary graph names are rejected.
+2. **Schema preservation**: AMLSim does not contain device, IP, or merchant entities. Transfers use `AML_SENT` and `AML_RECEIVED`; cash transactions can link to an `AMLBranch` using `AML_AT_BRANCH`; alerts link to accounts using `HAS_ALERT`.
+3. **Source evidence**: The importer preserves AMLSim alert source fields. The API derives a separate readable `display_description` from the check name without replacing `alert_text`, `check_name`, or `pattern`.
+4. **Simulation labels**: AMLSim `is_fraud` and `suspicious` values are source account labels in a simulation, not confirmed real-world findings or transaction-level flags.
 
 ---
 
@@ -137,15 +140,17 @@ flowchart TD
     SIGNALS["Connected-Account Signals"]
     ASSISTANT["Deterministic Investigation Assistant"]
     REPORT["PDF Case Report Exporter"]
+    LLM["Optional OpenAI-Compatible LLM"]
 
     USER --> UI
     UI --> API
     API <--> DB
     API --> INV
     INV --> DB
-    UI --> SIGNALS
-    UI --> ASSISTANT
-    ASSISTANT --> API
+    API --> SIGNALS
+    API --> ASSISTANT
+    ASSISTANT --> DB
+    ASSISTANT --> LLM
     UI --> REPORT
     REPORT --> API
 
@@ -155,7 +160,7 @@ flowchart TD
 
     class USER,UI interface
     class DB database
-    class API,INV,SIGNALS,ASSISTANT,REPORT processing
+    class API,INV,SIGNALS,ASSISTANT,REPORT,LLM processing
 ```
 
 ### Component Responsibilities
@@ -166,9 +171,9 @@ flowchart TD
 | FastAPI | REST endpoints, request validation, and investigation responses |
 | FalkorDB | Graph storage and relationship traversal |
 | Investigation logic | Collects connected-account and transaction evidence |
-| Connected-account signals | Evaluates shared-device, shared-IP, and merchant relationships |
-| Investigation assistant | Produces deterministic, evidence-based summaries |
-| PDF exporter | Generates a structured investigation report |
+| Connected-account signals | Evaluates relationships available in the selected dataset |
+| Investigation assistant | Routes questions to evidence retrieval and returns a deterministic summary or optional language-model answer |
+| PDF exporter | Requests investigation data from the API and generates a structured report |
 
 FalkorDB is central to the solution because the investigation depends on relationships between entities, rather than only on isolated transaction records.
 
@@ -187,7 +192,8 @@ FalkorDB is central to the solution because the investigation depends on relatio
 | Data presentation | Pandas |
 | PDF generation | ReportLab |
 | HTTP client | Requests |
-| Automated testing | Python `unittest` and smoke-test script |
+| Optional language-model provider | OpenAI-compatible chat completions API |
+| Automated testing | Python `unittest` test modules and API smoke-test scripts |
 | Local database runtime | Docker |
 
 ---
@@ -232,6 +238,17 @@ flowchart LR
 ```
 
 The graph model makes it possible to traverse from an investigated account to related infrastructure, transactions, and merchants.
+
+### IBM AMLSim graph
+
+| Node label | Relationships |
+|---|---|
+| `AMLAccount` | `AML_SENT` to outgoing transactions; `HAS_ALERT` to linked alerts |
+| `AMLTransaction` | `AML_RECEIVED` to recipient accounts when present; `AML_AT_BRANCH` to branch nodes for cash activity |
+| `AMLAlert` | Linked to its source account by `HAS_ALERT`; retains source alert text, check name, and pattern |
+| `AMLBranch` | Connected to cash transactions by `AML_AT_BRANCH` |
+
+AMLSim transaction statuses are read from the transaction record. Account-level `is_fraud` or `suspicious` labels do not, by themselves, mark a transaction as flagged.
 
 ### Example Investigation Pattern
 
@@ -291,7 +308,7 @@ WHERE length(path) <= $hops
 RETURN path
 ```
 
-The application API restricts the requested traversal depth to values between 1 and 3. Its graph endpoint returns structured node and relationship data for use by the dashboard.
+The `/graph/{account_id}` API limits neighborhood depth to 1–3. The separate `/paths` endpoint supports path searches of 1–6 hops.
 
 ---
 
@@ -300,7 +317,7 @@ The application API restricts the requested traversal depth to values between 1 
 ```text
 FraudTrace AI/
 ├── app.py                      # FastAPI REST application
-├── dashboard.py                # Streamlit 3D molecular investigation dashboard
+├── dashboard.py                # Streamlit graph investigation dashboard
 ├── dataset_registry.py         # Multi-dataset allowlist and registry
 ├── amlsim_importer.py          # IBM AMLSim CSV graph importer
 ├── amlsim_data/                # AMLSim CSV source data (accounts, tx, cash_tx, alerts)
@@ -311,19 +328,19 @@ FraudTrace AI/
 ├── case_memory.py              # Persistent case memory module (Track 02)
 ├── ai_assistant.py             # Grounded AI investigation assistant
 ├── export_case_report.py       # PDF case dossier report generator
-├── smoke_test.py               # Automated 28-point API smoke test
-├── test_case_memory.py         # Unit tests: Case memory persistence
-├── test_case_report.py         # Unit tests: PDF report formatting
-├── test_enhanced_features.py   # Unit tests: Multi-hop paths & clusters
-├── test_amlsim_importer.py     # Unit tests: AMLSim dataset importer
-├── test_dataset_isolation.py   # Unit tests: Strict graph isolation
-├── test_falkordb.py            # FalkorDB connectivity test
+├── smoke_test.py               # API smoke checks (writes and removes a temporary case memory)
+├── test_case_memory.py         # Graph-backed case-memory tests
+├── test_case_report.py         # PDF report formatting tests
+├── test_enhanced_features.py   # Graph-backed path, cluster, and evidence tests
+├── test_amlsim_importer.py     # AMLSim parsing and importer tests
+├── test_dataset_isolation.py   # Graph-backed dataset isolation tests
+├── test_falkordb.py            # FalkorDB connectivity test (creates test graph data)
 ├── requirements.txt            # Python dependencies
 ├── README.md                   # Full system documentation
-└── reports/                    # Generated forensic case dossiers (PDFs)
+└── reports/                    # Generated sample report output
 ```
 
-The `reports/` directory contains generated demonstration output. Keep the sample report in the public repository only if you intend to publish it as a synthetic example.
+The `reports/` directory may contain generated demonstration output. Confirm that any report is synthetic and appropriate for publication before sharing it.
 
 ---
 
@@ -383,7 +400,7 @@ Verify that the container is running:
 docker ps --filter "name=falkordb"
 ```
 
-### 5. Seed Demonstration Datasets
+### 5. Initialize local demonstration datasets
 
 FraudTrace AI includes two graphs:
 
@@ -391,16 +408,29 @@ FraudTrace AI includes two graphs:
    ```powershell
    python seed_graph.py
    ```
-   > **Note:** Run this script only once on initial setup. Do not re-run repeatedly to avoid wiping custom case memories or resetting state.
+   > **Destructive:** `seed_graph.py` deletes every node in the `FraudTrace` graph before recreating the sample graph. Only run it against a disposable local development graph after confirming the configured database target. Never run it against shared or production data.
 
 2. **IBM AMLSim Graph (`ibm_amlsim`)**:
    ```powershell
    python amlsim_importer.py --dry-run
-   python amlsim_importer.py
    ```
-   The importer validates all four CSV files before connecting and uses the dataset registry's configured database connection. The sample data includes 30 accounts, 45 account transfers, 88 cash transactions, and 2 alerts. Cash transactions are stored as `AMLTransaction` nodes linked to the source account and branch.
+   The dry run validates and counts records without writing to FalkorDB. To import, run `python amlsim_importer.py` only after confirming the configured database is a disposable/local development database; the importer writes or updates AMLSim nodes and relationships.
 
-Database settings are loaded from the project `.env` for local development; environment variables supplied by a hosting provider take precedence. Keep `.env` out of version control.
+### Environment variables
+
+Set configuration in the process environment or a local `.env` file. `.env` is ignored by Git; do not commit credential values.
+
+| Variable | Used by | Purpose |
+|---|---|---|
+| `FALKORDB_HOST`, `FALKORDB_PORT` | Backend | FalkorDB connection; defaults to local host and port |
+| `FALKORDB_USERNAME`, `FALKORDB_PASSWORD` | Backend | Optional FalkorDB authentication |
+| `API_BASE_URL` | Dashboard and API scripts | Backend base URL; defaults to local FastAPI |
+| `FRAUDTRACE_IMPORT_API_KEY` | Backend only | Required bearer secret for `POST /import-amlsim`; no default |
+| `FRAUDTRACE_LLM_API_KEY` or `OPENAI_API_KEY` | Assistant | Optional provider credential; values must remain secret |
+| `FRAUDTRACE_LLM_BASE_URL` | Assistant | Optional OpenAI-compatible API base URL |
+| `FRAUDTRACE_LLM_MODEL` | Assistant | Optional model name |
+
+The local `.env` file is loaded for development. Hosting-provider environment variables should be configured in the backend's secret/environment settings, not committed to this repository. Configure `FRAUDTRACE_IMPORT_API_KEY` as a unique, high-entropy secret (at least 32 random bytes); do not set it in the frontend. Keep a secure copy for authorized operators that need to run the import endpoint. The import endpoint fails closed with HTTP 503 if the backend key is missing. Deploy behind HTTPS, restrict access to the import endpoint to trusted operators where possible, and rotate the key through the secret manager if it may have been exposed. Never log the authorization header.
 
 ---
 
@@ -443,7 +473,7 @@ A previous backend instance or terminal session may still be running in the back
 #### 3. Docker Conflict: container name "/falkordb" is already in use
 This occurs if you run `docker run` when the container was previously created.
 * **Fix**: Run `docker start falkordb` instead of `docker run`.
-* If you need to recreate it from scratch:
+* Recreating a container can remove its stored data. Only remove a disposable local development container after confirming it contains no data that must be retained:
   ```powershell
   docker rm -f falkordb
   docker run -d --name falkordb -p 6379:6379 -p 3001:3000 falkordb/falkordb:latest
@@ -458,7 +488,7 @@ Follow these steps to launch the entire stack:
 ### Step 1: Start the FastAPI Backend (Terminal 1)
 
 ```powershell
-cd "D:\PROJECTS\FraudTrace AI"
+# Run from the repository root
 .\.venv\Scripts\Activate.ps1
 python -m uvicorn app:app --host 127.0.0.1 --port 8010
 ```
@@ -472,7 +502,7 @@ Keep this terminal running.
 ### Step 2: Start the Dashboard (Terminal 2)
 
 ```powershell
-cd "D:\PROJECTS\FraudTrace AI"
+# Run from the repository root
 .\.venv\Scripts\Activate.ps1
 streamlit run dashboard.py
 ```
@@ -485,27 +515,71 @@ The dashboard reads `API_BASE_URL` to locate FastAPI and defaults to `http://127
 ### Using the Multi-Dataset Dashboard
 1. Use the **Dataset Selector** in the sidebar to switch between `FraudTrace AI Demo (Synthetic)` and `IBM AMLSim (Transaction Network)`.
 2. Enter an account to investigate (`ACC002` for Demo; `AML_ACC_25` for AMLSim).
-3. Click **Generate / Refresh 3D Graph** to inspect the 3D molecular graph.
+3. Click **Explore Graph** to load the selected account's graph.
 4. Interact with the **AI Investigation Assistant** to explore suspicious patterns.
-5. Click **Export PDF Report** to download the court-ready case dossier.
+5. In **Reports**, use **Generate PDF Case Report** to create a structured investigation report. Report generation requests an assistant response and may save a case-memory observation.
 
 ---
 
 ## API Reference
 
-| Method | Endpoint | Query / Body Params | Purpose |
+| Method | Endpoint | Security class | Returned data / control |
 |---|---|---|---|
-| `GET` | `/` | — | API root information |
-| `GET` | `/health` | — | API & FalkorDB graph health check |
-| `GET` | `/datasets` | — | List all available datasets and schemas |
-| `GET` | `/dataset-stats/{dataset_id}` | — | Node and relationship statistics for dataset |
-| `GET` | `/investigate/{account_id}` | `dataset` (optional, default `demo_synthetic`) | Connected-account investigation signals |
-| `GET` | `/account-evidence/{account_id}` | `dataset` (optional, default `demo_synthetic`) | Detailed transaction evidence & amounts |
-| `GET` | `/graph/{account_id}?hops=2` | `hops` (1-3), `dataset` (optional) | Bounded subgraph neighborhood |
-| `GET` | `/clusters` | `dataset` (optional, default `demo_synthetic`) | Detect multi-account infrastructure clusters |
-| `POST` | `/ask` | `account_id`, `question`, `dataset` | Evidence-grounded assistant response |
-| `POST` | `/import-amlsim` | `dry_run` (boolean) | Execute or preview AMLSim dataset import |
-| `GET` | `/docs` | — | Interactive OpenAPI / Swagger documentation |
+| `GET` | `/` | Public metadata | Service name, version, and route list |
+| `GET` | `/health` | Public operational metadata | Probes demo graph; exposes database type and configured graph names |
+| `GET` | `/datasets` | Public metadata | Dataset schemas, descriptions, labels, graph names, and disclaimers |
+| `GET` | `/dataset-stats/{dataset_id}` | Public aggregate metadata | Node/relationship counts; failures may include diagnostic details |
+| `POST` | `/import-amlsim` | Backend bearer authentication | Requires backend-only `FRAUDTRACE_IMPORT_API_KEY`; non-dry-run modifies AMLSim graph |
+| `GET` | `/investigate/{account_id}` | Public synthetic-demo investigation data | Risk/fraud labels, related account IDs, relationship signals, and evidence |
+| `GET` | `/account-evidence/{account_id}` | Public synthetic-demo investigation data | Transactions, amounts, status, counterparties, alert/source fields |
+| `GET` | `/graph/{account_id}` | Public filtered synthetic-demo graph | Bounded graph; memory nodes/edges excluded and properties filtered |
+| `GET` | `/case-history/{account_id}` | Denied by default | Always returns HTTP 403 until verified identity and case grants exist |
+| `POST` | `/ask` | Public synthetic-demo investigation data; rate/body limited | Returns current question, answer, evidence; saves memory but skips prior-memory reads |
+| `GET` | `/paths` | Public filtered synthetic-demo graph | Path IDs/relationships; memory paths excluded and node properties filtered |
+| `GET` | `/clusters` | Public synthetic-demo investigation data | Account groups, heuristic scores, flagged account/transaction IDs and relationships |
+| `GET` | `/search` | Public filtered synthetic-demo graph | Entity matches; excludes memory nodes and filters properties |
+| `GET`, `HEAD` | `/openapi.json`, `/docs`, `/docs/oauth2-redirect`, `/redoc` | Public API schema/docs | Documents the API; no user identity required |
+
+"Public metadata" and "public filtered synthetic-demo graph" are intended for non-confidential demonstration data. "Public synthetic-demo investigation data" is visible to every caller and is not suitable for confidential information. "Backend bearer authentication" protects only the import operation; it does not authenticate dashboard users or authorize case access. "Denied by default" means there is no current authorized history path.
+
+The allowlist contains `demo_synthetic` and `ibm_amlsim`, both described in this project as synthetic. That is a code/configuration constraint, not a guarantee about what operators may later load into those graph names. Never place real, personal, or otherwise confidential data in a publicly served graph.
+
+`POST /ask` remains public for dashboard compatibility. It has a process-local rolling limit of 60 requests per 60 seconds (429 with `Retry-After`) and rejects bodies over 16 KiB (413) before assistant processing. Errors are sanitized. Because callers have no verified identity, `/ask` skips retrieval of previous persistent memories; it still returns the current caller's question/answer/evidence and saves a new observation. The client-provided session ID is not an identity credential. The in-memory limit is not distributed: multiple workers/instances have independent counters.
+
+`/case-history` always returns 403 without querying FalkorDB. Existing memories are retained but not exposed by that endpoint. Public graph, path, and search routes exclude memory nodes and filter properties. Other routes intentionally expose investigation signals/evidence for the synthetic demo, so graph filtering does not make the service appropriate for confidential cases.
+
+There is no end-user login, verified identity, or persistent case-to-user membership model. Before confidential use, implement server-side identity-provider token/session validation; persistent case membership records; owner/admin-controlled viewer and investigator grant/revocation workflows; and authorization checks on every endpoint returning case data. Existing cases need an explicit trusted ownership/membership migration. Do not infer permissions from account IDs, session IDs, arbitrary bearer headers, or static/shared frontend secrets.
+
+Before staging, use an isolated disposable graph. Verify every route in this table, including arbitrary bearer headers on `/case-history`, graph/path/search filtering, disabled prior-memory retrieval in `/ask`, and import/rate/body protections. Do not use production credentials or sensitive data. Stage and test the complete identity/membership design separately before enabling confidential cases.
+### Render staging and rollback
+
+The repository does not contain Render service settings, so verify the service topology and environment in the Render dashboard rather than assuming a worker or instance count:
+
+1. Open the [Render dashboard](https://dashboard.render.com/), select **Web Services**, and choose the backend whose service URL is `fraudtrace-ai-backend.onrender.com`.
+2. Open **Environment** and add `FRAUDTRACE_IMPORT_API_KEY`. Generate a fresh 32-byte (256-bit) URL-safe random value locally in PowerShell without printing it:
+   ```powershell
+   $bytes = New-Object byte[] 32
+   $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+   $rng.GetBytes($bytes)
+   $rng.Dispose()
+   $token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+   Set-Clipboard -Value $token
+   Remove-Variable bytes, token, rng
+   ```
+   Paste the clipboard value directly into the backend secret field, save the environment, then clear the clipboard with `Set-Clipboard -Value ''`. Do not add the key to the Streamlit service or repository. Saving environment changes may restart or redeploy the backend; verify the service status afterward.
+3. Confirm the service uses HTTPS. In **Settings**, inspect the start command for Uvicorn worker arguments and check the service's instance/scaling configuration. Keep the deployment to one worker and one instance to use the documented local counter as intended. If using multiple workers or instances, configure and verify an edge/shared-store limiter first; this application has no shared rate-limit store.
+4. Deploy and test the change in a staging service connected only to a disposable, isolated FalkorDB database. Do not point staging at production credentials or graphs. Verify normal dashboard flows, public graph filtering, disabled case-history behavior, import authorization, request limits, oversized requests, and error responses before promoting the revision. Do not use sensitive data; end-user case authorization is not implemented.
+5. For rollback, choose a previously reviewed deployment that still enforces `/import-amlsim` bearer authentication and preserve the backend secret environment variable. Do not roll back to a revision without import authentication unless `/import-amlsim` is first disabled or blocked at the hosting edge. Recheck service health and logs after the rollback; do not use `/ask` or the importer as a health probe.
+
+For an authorized manual import, send the bearer token from a trusted operator environment. For example, in PowerShell, once the secret is set in the current process environment:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "https://<backend-host>/import-amlsim?dry_run=true" `
+  -Headers @{ Authorization = "Bearer $env:FRAUDTRACE_IMPORT_API_KEY" }
+```
+
+Use `dry_run=true` to validate without graph writes. A request without `dry_run=true` changes the AMLSim graph; run it only when an authorized import is intended. Do not put the token in the dashboard, source control, command-line literals, or logs.
 
 ### Example Graph Request
 
@@ -525,11 +599,11 @@ GET /graph/AML_ACC_25?hops=2&dataset=ibm_amlsim
 {
   "account_id": "AML_ACC_25",
   "question": "What alerts and transactions are associated with this account?",
-  "dataset": "ibm_amlsim"
+  "dataset_id": "ibm_amlsim"
 }
 ```
 
-The assistant endpoint returns a structured response with the account, question, grounded answer, specific evidence tokens, and responsible-use notices.
+The assistant endpoint returns a structured response with the account, question, answer, evidence references, and responsible-use notice. It also writes an investigation-memory observation to the selected graph. The `/health` endpoint queries the demo graph and reports the configured graph names; it does not independently prove that every dataset graph contains data.
 
 For interactive schema inspection, use the Swagger UI at [http://127.0.0.1:8010/docs](http://127.0.0.1:8010/docs).
 
@@ -537,37 +611,40 @@ For interactive schema inspection, use the Swagger UI at [http://127.0.0.1:8010/
 
 ## Testing
 
-### Run All Unit Tests
+### Focused tests without live graph writes
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest test_case_report -v
+.\.venv\Scripts\python.exe -m unittest test_amlsim_importer.AMLSimImporterTests.test_fraud_labels_do_not_flag_simulated_transactions -v
+.\.venv\Scripts\python.exe -m unittest test_api_security -v
+.\.venv\Scripts\python.exe -m unittest test_assistant_safety -v
+```
+
+### Full graph-backed test suite
 
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s . -p "test_*.py" -v
 ```
 
-### Run End-to-End API Smoke Tests
+The full suite includes graph-backed tests that create and remove nodes, and an importer test that writes AMLSim data. Run it only against a dedicated disposable local FalkorDB database containing the expected seed graphs, never against production or shared data.
+
+### API smoke checks
 
 ```powershell
 .\.venv\Scripts\python.exe smoke_test.py
 ```
 
-### Verify the AMLSim API
-
-```powershell
-.\.venv\Scripts\python.exe verify_amlsim_api.py
-```
-
-Both API scripts require the local backend at `http://127.0.0.1:8010`; set `API_BASE_URL` to verify a hosted backend instead. The AMLSim verifier checks account search, graph traversal, transaction and alert evidence, paths, clusters, and assistant evidence, then removes its temporary case-memory record.
+The smoke check requires a running backend and seeded demo graph. It posts an assistant request, which temporarily writes a case-memory node, and then attempts to delete that test node. `verify_amlsim_api.py` similarly posts an assistant request and removes a temporary AMLSim memory. Use these scripts only against a dedicated disposable test database; setting `API_BASE_URL` to a hosted backend does not make their writes safe.
 
 ---
 
 ## Example Investigation
 
-The current synthetic dataset contains accounts, devices, IP addresses, transactions, and merchants.
+The `demo_synthetic` dataset contains accounts, devices, IP addresses, transactions, and merchants.
 
-An example investigation of `ACC002` returns connected-account signals involving `ACC001`, `ACC003`, and `ACC006`. It also includes flagged transaction `TXN002`, with an amount of 8,700 in the synthetic dataset.
+For the synthetic walkthrough, investigate `ACC002`. The seeded example graph links it to `ACC001`, `ACC003`, and `ACC006` through shared entities, and its transaction evidence includes `TXN002` with a flagged status. In the IBM AMLSim dataset, `AML_ACC_25` is linked to alert `AML_ALERT_0`; its readable display description is derived from the check name while the source alert text remains available separately.
 
-At traversal depth 3, the tested API returned 12 graph nodes and 15 relationships for this example.
-
-The application can use these connections to guide further inspection of shared devices, IP addresses, transaction activity, and merchants.
+Use the graph and evidence panels to inspect these relationships, then compare the corresponding source evidence. The application presents them as investigation leads, not conclusions.
 
 **Interpretation matters:** these values describe the synthetic example, not an observed real-world fraud incident. A flagged status and a shared infrastructure relationship are not proof of wrongdoing.
 
@@ -577,11 +654,11 @@ The application can use these connections to guide further inspection of shared 
 
 FraudTrace AI is an investigation-support demonstration.
 
-- **Synthetic data:** The current example data is generated for demonstration and testing.
+- **Synthetic data:** Both available datasets are simulations; AMLSim data is not real-world financial activity.
 - **No conclusive fraud determination:** A flagged transaction is a review signal, not proof of fraud.
 - **Shared infrastructure:** Legitimate accounts may share devices, networks, and merchants.
 - **Heuristic priorities:** Review priorities are not calibrated fraud probabilities.
-- **Evidence-grounded assistant:** The assistant uses deterministic question routing and retrieved graph evidence, with optional Groq/OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the returned evidence references.
+- **Evidence-grounded assistant:** The assistant uses deterministic question routing and retrieved graph evidence, with optional OpenAI-compatible language-model answering when configured. Model-generated responses may be incorrect; verify claims against the returned evidence references.
 - **No claimed real-world accuracy:** No real-world precision, recall, false-positive rate, or financial-loss reduction claim is made.
 - **Human oversight:** Investigators should verify source records, consider alternative explanations, and follow appropriate review procedures.
 
@@ -597,7 +674,7 @@ Potential future work includes:
 - Improved PDF layout and visual summaries of multi-hop paths.
 - Reproducible clean-environment installation and automated integration testing.
 - More extensive graph investigation scenarios and evaluation datasets.
-- Optional language-model integration with evidence-grounded responses and explicit source references.
+- Clearer presentation of graph-path evidence and report contents.
 - Security, privacy, access control, and audit capabilities for a production deployment.
 - Evaluation using representative, appropriately governed data before making performance claims.
 
@@ -607,12 +684,12 @@ These are proposed improvements, not claims about features already implemented.
 
 ## AI-Assisted Development Disclosure
 
-AI coding assistance was used during development to help review code, improve documentation, troubleshoot issues, and refine implementation details. The project was tested locally using Python compilation, unit tests, and API smoke tests. The project author is responsible for understanding, validating, and explaining the submitted implementation, graph model, queries, and technical decisions.
+AI coding assistance was used during development to help review code, improve documentation, troubleshoot issues, and refine implementation details. The project author is responsible for understanding, validating, and explaining the submitted implementation, graph model, queries, and technical decisions.
 
 ---
 
 ## Acknowledgements
 
-Built to explore graph-powered investigation workflows using FalkorDB.
+Built for the WeMakeDevs × FalkorDB Graph Hacks. The synthetic AML network is based on the [IBM AMLSim project](https://github.com/IBM/AMLSim); FalkorDB provides the graph database used by this application.
 
 **FraudTrace AI — connect the evidence, investigate the pattern, and keep the decision human.**

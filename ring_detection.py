@@ -265,8 +265,11 @@ def find_graph_paths(
 
     query = """
     MATCH (s {id: $source_id}), (t {id: $target_id})
+    WHERE NOT 'InvestigationMemory' IN labels(s)
+      AND NOT 'InvestigationMemory' IN labels(t)
     MATCH path = (s)-[*1..6]-(t)
     WHERE length(path) <= $hops
+      AND all(n IN nodes(path) WHERE NOT 'InvestigationMemory' IN labels(n))
     RETURN [n IN nodes(path) | {id: n.id, label: labels(n)[0], properties: properties(n)}] AS path_nodes,
            [r IN relationships(path) | {source: startNode(r).id, target: endNode(r).id, type: type(r)}] AS path_edges,
            length(path) AS hops
@@ -566,6 +569,7 @@ def search_graph_entities(query_text: str, limit: int = 15, dataset_id: str = "d
     query = """
     MATCH (n)
     WHERE toUpper(n.id) CONTAINS toUpper($search_term)
+      AND NOT 'InvestigationMemory' IN labels(n)
     RETURN n.id AS id, labels(n)[0] AS type, properties(n) AS properties
     LIMIT $limit
     """

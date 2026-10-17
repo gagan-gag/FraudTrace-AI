@@ -3,7 +3,9 @@
 FraudTrace AI — API Smoke Tests
 --------------------------------
 Checks the running FastAPI service and its FalkorDB-backed
-investigation endpoints without modifying graph data.
+investigation endpoints. The assistant check temporarily writes a
+case-memory node and then attempts to remove it, so run this only
+against a dedicated test database.
 
 Run:
     python smoke_test.py
