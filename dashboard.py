@@ -40,14 +40,12 @@ from ai_assistant import alert_display_description
 # CONFIGURATION & THEME
 # ============================================================
 
-
 import os
 
 API_URL = os.getenv(
     "API_BASE_URL",
-    "http://127.0.0.1:8010",
+    "https://fraudtrace-ai-backend.onrender.com",
 ).rstrip("/")
-
 
 st.set_page_config(
     page_title="FraudTrace AI — Graph-Powered Fraud Investigation",
