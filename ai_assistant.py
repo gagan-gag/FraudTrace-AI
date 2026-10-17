@@ -14,6 +14,7 @@ Features:
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -45,6 +46,8 @@ MAX_MEMORY_ITEMS = 2
 MAX_MEMORY_QUESTION_CHARS = 250
 MAX_MEMORY_ANSWER_CHARS = 500
 MAX_RESPONSE_TOKENS = 700
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -186,8 +189,8 @@ NETWORK_TERMS = (
     "connect", "connected", "related account", "related accounts",
     "network", "device", "devices", "ip", "address", "shared",
     "connection", "connections", "path", "paths", "multi-hop",
-    "multihop", "linked", "link", "neighbor", "neighbour",
-    "counterparty", "counterparties", "aml",
+    "multihop", "linked account", "linked accounts", "neighbor",
+    "neighbour", "counterparty", "counterparties",
 )
 
 TRANSACTION_TERMS = (
@@ -217,7 +220,8 @@ def plan_investigation(question: str) -> dict[str, Any]:
     asks_alerts = any(term in normalized for term in ALERT_TERMS)
     asks_risk = any(term in normalized for term in RISK_TERMS)
 
-    if asks_risk or not (asks_network or asks_transactions or asks_alerts):
+    focus_count = sum((asks_network, asks_transactions, asks_alerts))
+    if asks_risk or not focus_count:
         tools = [
             "connected_account_signals",
             "transaction_evidence",
@@ -231,17 +235,38 @@ def plan_investigation(question: str) -> dict[str, Any]:
         if asks_transactions or asks_alerts:
             tools.append("transaction_evidence")
 
-    intent = (
-        "risk_review" if asks_risk
-        else "alert_review" if asks_alerts
-        else "network_investigation" if asks_network
-        else "transaction_review" if asks_transactions
-        else "general_investigation"
-    )
+    if asks_risk or not focus_count:
+        requested_sections = [
+            "connected_accounts",
+            "transactions",
+            "alerts",
+        ]
+    else:
+        requested_sections = []
+        if asks_network:
+            requested_sections.append("connected_accounts")
+        if asks_transactions:
+            requested_sections.append("transactions")
+        if asks_alerts:
+            requested_sections.append("alerts")
+
+    if asks_risk:
+        intent = "risk_review"
+    elif focus_count > 1:
+        intent = "combined_investigation"
+    elif asks_alerts:
+        intent = "alert_review"
+    elif asks_network:
+        intent = "network_investigation"
+    elif asks_transactions:
+        intent = "transaction_review"
+    else:
+        intent = "general_investigation"
 
     return {
         "intent": intent,
         "selected_tools": tools,
+        "requested_sections": requested_sections,
         "planning_method": "deterministic_question_routing",
     }
 
@@ -564,6 +589,201 @@ def _prepare_memories(
     return compact_memories
 
 
+def _format_graph_evidence_answer(
+    account_id: str,
+    evidence_context: dict[str, Any],
+) -> str:
+    """Format a question-focused summary from the selected graph evidence."""
+    dataset_id = evidence_context.get("dataset_id", "demo_synthetic")
+    intent = evidence_context.get("intent", "general_investigation")
+    requested_sections = set(evidence_context.get("requested_sections") or (
+        "connected_accounts",
+        "transactions",
+        "alerts",
+    ))
+    selected_tools = set(evidence_context.get("selected_tools") or (
+        "connected_account_signals",
+        "transaction_evidence",
+    ))
+    network = evidence_context.get("connected_account_evidence") or {}
+    transaction_evidence = evidence_context.get("transaction_evidence") or {}
+    related_accounts = network.get("related_accounts") or []
+    transactions = transaction_evidence.get("transactions") or []
+    alerts = transaction_evidence.get("alerts") or []
+    references = {
+        (
+            item.get("type"),
+            item.get("transaction_id")
+            or item.get("alert_id")
+            or item.get("account_id"),
+        ): item.get("evidence_id")
+        for item in evidence_context.get("evidence_references", [])
+        if isinstance(item, dict)
+    }
+
+    def evidence_id(kind: str, item: dict[str, Any], identifier: Any) -> str:
+        return str(
+            item.get("evidence_id")
+            or references.get((kind, identifier))
+            or f"EV-{kind.upper()}-UNKNOWN"
+        )
+
+    related_count = len(related_accounts)
+    if intent == "alert_review":
+        status = (
+            f"{len(alerts)} AML alert(s) were retrieved."
+            if alerts
+            else "No linked AML alerts were found in the retrieved evidence."
+        )
+    elif intent == "transaction_review":
+        status = f"{len(transactions)} transaction(s) were retrieved."
+    elif intent == "network_investigation":
+        status = f"{related_count} connected account(s) were retrieved."
+    else:
+        status = (
+            "Findings are limited to evidence retrieved from the selected "
+            "graph tools."
+        )
+
+    lines = [
+        f"Investigation findings for account {account_id} "
+        f"(dataset: {'IBM AMLSim' if dataset_id == 'ibm_amlsim' else 'FraudTrace AI'}):",
+        f"- Risk label: {evidence_context.get('stored_risk_label', 'not available')}",
+        f"- Investigation status: {status}",
+    ]
+
+    if (
+        "connected_accounts" in requested_sections
+        and "connected_account_signals" in selected_tools
+    ):
+        lines.extend(["", "## Connected Accounts"])
+        if related_accounts:
+            for item in related_accounts[:10]:
+                account = item.get("account_id")
+                if dataset_id == "ibm_amlsim":
+                    signals = ", ".join(item.get("signals") or []) or "none listed"
+                    sent = len(item.get("sent_transactions") or [])
+                    received = len(item.get("received_transactions") or [])
+                    shared_alerts = ", ".join(item.get("shared_alerts") or []) or "none"
+                    lines.append(
+                        f"- {account} [Priority: {item.get('review_priority', 'REVIEW')}]: "
+                        f"signals ({signals}), sent transactions ({sent}), "
+                        f"received transactions ({received}), shared alerts "
+                        f"({shared_alerts}). "
+                        f"[{evidence_id('connected_account', item, account)}]"
+                    )
+                else:
+                    details = item.get("evidence") or []
+                    if not details:
+                        details = []
+                        for field, label in (
+                            ("shared_devices", "Shared devices"),
+                            ("shared_ips", "Shared IP addresses"),
+                            ("common_merchants", "Common merchants"),
+                        ):
+                            values = item.get(field) or []
+                            if values:
+                                details.append(f"{label}: {', '.join(map(str, values))}")
+                    lines.append(
+                        f"- {account} [Priority: {item.get('review_priority', 'REVIEW')}]: "
+                        f"signals ({', '.join(item.get('signals') or []) or 'not available'}); "
+                        f"{'; '.join(map(str, details)) or 'relationship details not available'}. "
+                        f"[{evidence_id('connected_account', item, account)}]"
+                    )
+        elif dataset_id == "ibm_amlsim":
+            lines.append("- No connected AML counterparties were found.")
+        else:
+            lines.append("- No connected accounts were found.")
+
+    if (
+        "transactions" in requested_sections
+        and "transaction_evidence" in selected_tools
+    ):
+        lines.extend(["", "## Transactions"])
+        if transactions:
+            flagged_count = sum(
+                str(item.get("status", "")).lower() == "flagged"
+                for item in transactions
+            )
+            lines.append(
+                f"- {len(transactions)} transaction(s) retrieved; "
+                f"{flagged_count} have a flagged transaction status."
+            )
+            for item in transactions[:10]:
+                transaction = item.get("transaction_id")
+                details = [
+                    f"status: {item.get('status', 'unknown')}",
+                    f"amount: {item.get('amount', 'not available')}",
+                ]
+                if item.get("direction") is not None:
+                    details.append(f"direction: {item['direction']}")
+                if item.get("counterparty") is not None:
+                    details.append(f"counterparty: {item['counterparty']}")
+                if item.get("merchant_id") is not None:
+                    details.append(f"merchant: {item['merchant_id']}")
+                lines.append(
+                    f"- {transaction}: {'; '.join(details)}. "
+                    f"[{evidence_id('transaction', item, transaction)}]"
+                )
+        else:
+            lines.append("- No transactions were found for this account.")
+
+    if (
+        "alerts" in requested_sections
+        and "transaction_evidence" in selected_tools
+    ):
+        lines.extend(["", "## AML Alerts"])
+        if alerts:
+            for item in alerts[:10]:
+                alert_id = item.get("alert_id")
+                description = (
+                    item.get("display_description")
+                    or item.get("check_name")
+                    or "unknown"
+                )
+                lines.append(
+                    f"- {alert_id}: {description}; check name: "
+                    f"{item.get('check_name', 'not available')}; pattern: "
+                    f"{item.get('pattern', 'not available')}; event date: "
+                    f"{item.get('event_date', 'not available')}; source alert text: "
+                    f"{item.get('alert_text', 'not available')}. "
+                    f"[{evidence_id('alert', item, alert_id)}]"
+                )
+        else:
+            lines.append("- No alerts were found linked to this account.")
+
+    if intent == "alert_review":
+        recommendations = [
+            "Confirm alert details against the source record and check definition.",
+            "Review linked transactions as separate leads.",
+        ]
+    elif intent == "transaction_review":
+        recommendations = [
+            "Verify transaction fields against their source records.",
+            "Corroborate counterparties and transaction context independently.",
+        ]
+    elif intent == "network_investigation":
+        recommendations = [
+            "Validate reported relationships against source records.",
+            "Check for legitimate explanations for shared accounts or resources.",
+        ]
+    else:
+        recommendations = [
+            "Corroborate these leads with independent source evidence.",
+            "Record observations as unverified until reviewed.",
+        ]
+    lines.extend(["", "Recommended next steps (not findings):"])
+    lines.extend(f"- {item}" for item in recommendations)
+    warning = evidence_context.get("warning") or WARNING
+    lines.extend(["", f"Data disclaimer: {warning}"])
+    if dataset_id == "ibm_amlsim":
+        lines.append(
+            "IBM AMLSim is synthetic simulation data; account labels are "
+            "not transaction-level fraud findings."
+        )
+    return "\n".join(lines)
+
+
 # ============================================================
 # GROQ / OPENAI-COMPATIBLE ANSWERING
 # ============================================================
@@ -580,109 +800,10 @@ def _answer_with_llm(
     dataset_id = evidence_context.get("dataset_id", "demo_synthetic")
 
     if config is None:
-        conn_ev = evidence_context.get("connected_account_evidence") or {}
-        tx_ev = evidence_context.get("transaction_evidence") or {}
-        related = conn_ev.get("related_accounts") or []
-        txns = tx_ev.get("transactions") or []
-        alerts = tx_ev.get("alerts") or []
-
-        if dataset_id == "ibm_amlsim":
-            summary_lines = [
-                f"Investigation findings for account {account_id} (retrieved directly from IBM AMLSim graph):",
-            ]
-            if related:
-                summary_lines.append(f"- Connected AML Counterparties ({len(related)}):")
-                for r in related:
-                    acc = r.get("account_id")
-                    signals = ", ".join(r.get("signals") or [])
-                    sent = len(r.get("sent_transactions") or [])
-                    recv = len(r.get("received_transactions") or [])
-                    alerts = ", ".join(r.get("shared_alerts") or []) or "none"
-                    is_f = " [FLAGGED FRAUD]" if r.get("counterparty_is_fraud") else ""
-                    summary_lines.append(
-                        f"  • {acc}{is_f} (Priority: {r.get('review_priority', 'REVIEW')}) [EV-LINK-{acc}]: "
-                        f"signals ({signals}), sent txns ({sent}), received txns ({recv}), shared alerts ({alerts})"
-                    )
-            elif conn_ev.get("found"):
-                summary_lines.append(
-                    "- No connected AML counterparties were found."
-                )
-
-            if txns:
-                flagged = [t for t in txns if str(t.get("status", "")).lower() == "flagged"]
-                summary_lines.append(f"- Transactions: {len(txns)} total ({len(flagged)} flagged/suspicious).")
-                for t in txns[:6]:
-                    dir_label = t.get("direction", "transfer")
-                    cp = t.get("counterparty", "N/A")
-                    summary_lines.append(
-                        f"  • {t.get('transaction_id')} [{dir_label}]: amount ${t.get('amount')}, "
-                        f"counterparty {cp} [EV-TXN-{t.get('transaction_id')}]"
-                    )
-            elif tx_ev.get("found"):
-                summary_lines.append(
-                    "- No transactions were found for this account."
-                )
-
-            if alerts:
-                summary_lines.append(f"- Alerts linked to this account: {len(alerts)}.")
-                for alert in alerts:
-                    summary_lines.append(
-                        f"  • {alert.get('alert_id')} "
-                        f"({alert.get('display_description') or alert.get('check_name') or 'unknown'}, "
-                        f"date: {alert.get('event_date') or 'unknown'}, "
-                        f"escalated: {bool(alert.get('escalated'))}) "
-                        f"[EV-ALERT-{alert.get('alert_id')}]"
-                    )
-            elif tx_ev.get("found"):
-                summary_lines.append(
-                    "- No alerts were found linked to this account."
-                )
-
-            summary_lines.append(
-                "\nNote: IBM AMLSim is simulation data; its labels are not "
-                "confirmed findings. Branches represent cash-transaction locations. "
-                "Device and IP address entities are not present in this dataset."
-            )
-            return "\n".join(summary_lines), "graph_evidence_summary"
-
-        else:
-            summary_lines = [
-                f"Investigation findings for account {account_id} (retrieved directly from FalkorDB graph):",
-            ]
-            if related:
-                summary_lines.append(f"- Connected Accounts ({len(related)}):")
-                for r in related:
-                    acc = r.get("account_id")
-                    devices = ", ".join(r.get("shared_devices") or []) or "none"
-                    ips = ", ".join(r.get("shared_ips") or []) or "none"
-                    merchants = ", ".join(r.get("common_merchants") or []) or "none"
-                    summary_lines.append(
-                        f"  • {acc} (Priority: {r.get('review_priority', 'REVIEW')}) [EV-LINK-{acc}]: "
-                        f"shared devices ({devices}), shared IPs ({ips}), common merchants ({merchants})"
-                    )
-            elif conn_ev.get("found"):
-                summary_lines.append(
-                    "- No connected accounts were found."
-                )
-
-            if txns:
-                flagged = [t for t in txns if str(t.get("status", "")).lower() == "flagged"]
-                summary_lines.append(f"- Transactions: {len(txns)} total ({len(flagged)} flagged).")
-                for t in txns[:6]:
-                    status_label = t.get("status", "unknown")
-                    summary_lines.append(
-                        f"  • {t.get('transaction_id')} [{status_label}]: amount {t.get('amount')}, "
-                        f"merchant {t.get('merchant_id')} [EV-TXN-{t.get('transaction_id')}]"
-                    )
-            elif tx_ev.get("found"):
-                summary_lines.append(
-                    "- No transactions were found for this account."
-                )
-
-            summary_lines.append(
-                "\nNote: AI LLM is operating in graph-evidence mode. All conclusions are directly grounded in current FalkorDB records."
-            )
-            return "\n".join(summary_lines), "graph_evidence_summary"
+        return (
+            _format_graph_evidence_answer(account_id, evidence_context),
+            "graph_evidence_summary",
+        )
 
     api_key, base_url, model = config
 
@@ -919,6 +1040,7 @@ def investigate_question(
     tool_results: dict[str, Any] = {}
     steps: list[dict[str, str]] = []
     previous_memories: list[dict[str, Any]] = []
+    stage = "account_lookup"
 
     try:
         # Validate the account exists in selected dataset.
@@ -979,6 +1101,7 @@ def investigate_question(
             risk_label = "HIGH (isFraud=True)" if r_row[1] else "MEDIUM (suspicious=True)" if r_row[2] else "LOW"
 
         if include_previous_memories:
+            stage = "retrieve_previous_memories"
             try:
                 memory_result = get_recent_investigation_memories(
                     account_id=account_id,
@@ -991,7 +1114,12 @@ def investigate_question(
                     "step": "retrieve_previous_memories",
                     "status": "completed",
                 })
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Investigation stage=%s exception_type=%s",
+                    stage,
+                    type(exc).__name__,
+                )
                 steps.append({
                     "step": "retrieve_previous_memories",
                     "status": "failed",
@@ -1004,6 +1132,7 @@ def investigate_question(
 
         # Retrieve only the evidence tools selected for this question.
         for tool_name in plan["selected_tools"]:
+            stage = tool_name
             if tool_name == "connected_account_signals":
                 result = get_connected_account_evidence(account_id, dataset_id=dataset_id)
                 tool_results[tool_name] = result
@@ -1077,10 +1206,14 @@ def investigate_question(
             "connected_account_evidence": network,
             "transaction_evidence": transactions,
             "evidence_references": evidence_references,
+            "intent": plan["intent"],
+            "selected_tools": plan["selected_tools"],
+            "requested_sections": plan["requested_sections"],
             "warning": warning_text,
         }
 
         # Produce an AI answer using bounded context.
+        stage = "natural_language_answer"
         answer, answer_method = _answer_with_llm(
             account_id=account_id,
             question=question,
@@ -1098,6 +1231,7 @@ def investigate_question(
         memory_saved = False
         memory_save_error = None
 
+        stage = "save_investigation_memory"
         try:
             saved = save_investigation_memory(
                 account_id=account_id,
@@ -1116,8 +1250,13 @@ def investigate_question(
                     "completed" if memory_saved else "failed"
                 ),
             })
-        except Exception:
+        except Exception as exc:
             memory_save_error = "Unable to save the investigation memory."
+            logger.warning(
+                "Investigation stage=%s exception_type=%s",
+                stage,
+                type(exc).__name__,
+            )
             steps.append({
                 "step": "save_investigation_memory",
                 "status": "failed",
@@ -1161,6 +1300,11 @@ def investigate_question(
         return response
 
     except Exception as exc:
+        logger.error(
+            "Investigation stage=%s exception_type=%s",
+            stage,
+            type(exc).__name__,
+        )
         return {
             "account_id": account_id,
             "dataset_id": dataset_id,
@@ -1175,6 +1319,6 @@ def investigate_question(
             "memory_saved": False,
             "previous_memories": previous_memories,
             "memory_count": len(previous_memories),
-            "error": str(exc),
+            "error": "The investigation could not be completed.",
             "warning": warning_text,
         }
