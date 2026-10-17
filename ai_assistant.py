@@ -14,6 +14,7 @@ Features:
 """
 
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -45,6 +46,8 @@ MAX_MEMORY_ITEMS = 2
 MAX_MEMORY_QUESTION_CHARS = 250
 MAX_MEMORY_ANSWER_CHARS = 500
 MAX_RESPONSE_TOKENS = 700
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================
@@ -593,11 +596,13 @@ def _answer_with_llm(
                     signals = ", ".join(r.get("signals") or [])
                     sent = len(r.get("sent_transactions") or [])
                     recv = len(r.get("received_transactions") or [])
-                    alerts = ", ".join(r.get("shared_alerts") or []) or "none"
+                    shared_alerts_text = (
+                        ", ".join(r.get("shared_alerts") or []) or "none"
+                    )
                     is_f = " [FLAGGED FRAUD]" if r.get("counterparty_is_fraud") else ""
                     summary_lines.append(
                         f"  • {acc}{is_f} (Priority: {r.get('review_priority', 'REVIEW')}) [EV-LINK-{acc}]: "
-                        f"signals ({signals}), sent txns ({sent}), received txns ({recv}), shared alerts ({alerts})"
+                        f"signals ({signals}), sent txns ({sent}), received txns ({recv}), shared alerts ({shared_alerts_text})"
                     )
 
             if txns:
@@ -801,13 +806,28 @@ Do not return JSON unless explicitly requested.
         response.raise_for_status()
         data = response.json()
 
+        if not isinstance(data, dict):
+            raise ValueError("The provider response must be a JSON object.")
+
         choices = data.get("choices") or []
+        if not isinstance(choices, list):
+            raise ValueError("The provider response choices must be a list.")
         if not choices:
             raise ValueError("The provider returned no answer choices.")
 
-        answer = (
-            choices[0].get("message", {}).get("content") or ""
-        ).strip()
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            raise ValueError("The provider returned an invalid answer choice.")
+
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            raise ValueError("The provider returned an invalid answer message.")
+
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ValueError("The provider returned non-text answer content.")
+
+        answer = content.strip()
 
         if not answer:
             raise ValueError("The model returned an empty answer.")
@@ -820,6 +840,12 @@ Do not return JSON unless explicitly requested.
             if exc.response is not None
             else "unknown"
         )
+        logger.warning(
+            "Investigation stage=llm_http exception_type=%s status=%s",
+            type(exc).__name__,
+            status,
+            exc_info=True,
+        )
         return (
             f"The AI provider returned HTTP {status}. Check the model, "
             "API access, quota, and provider configuration.",
@@ -827,13 +853,23 @@ Do not return JSON unless explicitly requested.
         )
 
     except requests.exceptions.RequestException as exc:
+        logger.warning(
+            "Investigation stage=llm_request exception_type=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         return (
             f"The AI provider could not be reached ({type(exc).__name__}). "
             "Check the network connection and endpoint URL.",
             "llm_request_failed",
         )
 
-    except (ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError) as exc:
+        logger.warning(
+            "Investigation stage=llm_response_processing exception_type=%s",
+            type(exc).__name__,
+            exc_info=True,
+        )
         return (
             "The AI provider returned a response that could not be "
             "processed. Check the configured model and provider response.",
@@ -894,6 +930,7 @@ def investigate_question(
     tool_results: dict[str, Any] = {}
     steps: list[dict[str, str]] = []
     previous_memories: list[dict[str, Any]] = []
+    stage = "account_lookup"
 
     try:
         # Validate the account exists in selected dataset.
@@ -954,6 +991,7 @@ def investigate_question(
             risk_label = "HIGH (isFraud=True)" if r_row[1] else "MEDIUM (suspicious=True)" if r_row[2] else "LOW"
 
         # Load prior memories, scoped to this account, session, and dataset.
+        stage = "retrieve_previous_memories"
         try:
             memory_result = get_recent_investigation_memories(
                 account_id=account_id,
@@ -966,7 +1004,13 @@ def investigate_question(
                 "step": "retrieve_previous_memories",
                 "status": "completed",
             })
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "Investigation stage=%s exception_type=%s",
+                stage,
+                type(exc).__name__,
+                exc_info=True,
+            )
             steps.append({
                 "step": "retrieve_previous_memories",
                 "status": "failed",
@@ -974,6 +1018,7 @@ def investigate_question(
 
         # Retrieve only the evidence tools selected for this question.
         for tool_name in plan["selected_tools"]:
+            stage = tool_name
             if tool_name == "connected_account_signals":
                 result = get_connected_account_evidence(account_id, dataset_id=dataset_id)
                 tool_results[tool_name] = result
@@ -1051,6 +1096,7 @@ def investigate_question(
         }
 
         # Produce an AI answer using bounded context.
+        stage = "answer_generation"
         answer, answer_method = _answer_with_llm(
             account_id=account_id,
             question=question,
@@ -1068,6 +1114,7 @@ def investigate_question(
         memory_saved = False
         memory_save_error = None
 
+        stage = "save_investigation_memory"
         try:
             saved = save_investigation_memory(
                 account_id=account_id,
@@ -1088,6 +1135,12 @@ def investigate_question(
             })
         except Exception as exc:
             memory_save_error = str(exc)
+            logger.warning(
+                "Investigation stage=%s exception_type=%s",
+                stage,
+                type(exc).__name__,
+                exc_info=True,
+            )
             steps.append({
                 "step": "save_investigation_memory",
                 "status": "failed",
@@ -1131,6 +1184,12 @@ def investigate_question(
         return response
 
     except Exception as exc:
+        logger.error(
+            "Investigation stage=%s exception_type=%s",
+            stage,
+            type(exc).__name__,
+            exc_info=True,
+        )
         return {
             "account_id": account_id,
             "dataset_id": dataset_id,
