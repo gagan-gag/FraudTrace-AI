@@ -1,5 +1,16 @@
-from fastapi import FastAPI, HTTPException, Query
+import hmac
+import os
+import threading
+import time
+from collections import deque
+
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from dataset_registry import (
     validate_dataset_id,
@@ -13,8 +24,6 @@ from ai_assistant import (
     investigate_question,
     get_transaction_evidence,
 )
-
-from case_memory import get_recent_investigation_memories
 
 from ring_detection import (
     find_graph_paths,
@@ -38,6 +47,199 @@ app = FastAPI(
     ),
     version="0.7.0",
 )
+
+ASK_RATE_LIMIT = 60
+ASK_RATE_WINDOW_SECONDS = 60
+ASK_MAX_BODY_BYTES = 16 * 1024
+
+PUBLIC_GRAPH_PROPERTIES = {
+    "Account": frozenset({"id"}),
+    "AMLAccount": frozenset({"id"}),
+    "Device": frozenset({"id"}),
+    "IPAddress": frozenset({"id"}),
+    "Merchant": frozenset({"id"}),
+    "Transaction": frozenset({"id", "amount", "status"}),
+    "AMLTransaction": frozenset({"id", "amount", "status"}),
+    "AMLAlert": frozenset({
+        "id",
+        "check_name",
+        "pattern",
+        "event_date",
+        "alert_text",
+        "escalated",
+    }),
+    "AMLBranch": frozenset({"id"}),
+}
+
+
+def _filter_public_graph_properties(
+    label: str,
+    properties: dict | None,
+) -> dict:
+    allowed_properties = PUBLIC_GRAPH_PROPERTIES.get(label, frozenset())
+    source = properties or {}
+    return {
+        key: source[key]
+        for key in allowed_properties
+        if key in source
+    }
+
+
+class SlidingWindowRateLimiter:
+    """Process-local rolling-window limiter for the public assistant route."""
+
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._request_times: deque[float] = deque()
+        self._lock = threading.Lock()
+
+    def retry_after(self) -> int | None:
+        now = time.monotonic()
+        with self._lock:
+            while (
+                self._request_times
+                and now - self._request_times[0] >= self.window_seconds
+            ):
+                self._request_times.popleft()
+
+            if len(self._request_times) >= self.max_requests:
+                wait = self.window_seconds - (
+                    now - self._request_times[0]
+                )
+                return max(1, int(wait + 0.999))
+
+            self._request_times.append(now)
+            return None
+
+_ask_rate_limiter = SlidingWindowRateLimiter(
+    max_requests=ASK_RATE_LIMIT,
+    window_seconds=ASK_RATE_WINDOW_SECONDS,
+)
+
+
+class AskProtectionMiddleware:
+    """Apply bounded request-size and process-local rate limits to /ask."""
+
+    def __init__(self, app):
+        self.downstream_app = app
+
+    async def __call__(self, scope, receive, send):
+        if (
+            scope["type"] != "http"
+            or scope["method"] != "POST"
+            or scope["path"] != "/ask"
+        ):
+            await self.downstream_app(scope, receive, send)
+            return
+
+        retry_after = _ask_rate_limiter.retry_after()
+        if retry_after is not None:
+            response = JSONResponse(
+                status_code=429,
+                content={
+                    "detail": (
+                        "Too many assistant requests. "
+                        "Please try again shortly."
+                    )
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
+            await response(scope, receive, send)
+            return
+
+        headers = dict(scope.get("headers", []))
+        content_length = headers.get(b"content-length")
+        if content_length is not None:
+            try:
+                if int(content_length) > ASK_MAX_BODY_BYTES:
+                    await self._body_too_large(scope, receive, send)
+                    return
+            except ValueError:
+                pass
+
+        request_body = bytearray()
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+
+            chunk = message.get("body", b"")
+            if len(request_body) + len(chunk) > ASK_MAX_BODY_BYTES:
+                await self._body_too_large(scope, receive, send)
+                return
+            request_body.extend(chunk)
+            if not message.get("more_body", False):
+                break
+
+        body_sent = False
+
+        async def replay_body():
+            nonlocal body_sent
+            if body_sent:
+                return {"type": "http.disconnect"}
+            body_sent = True
+            return {
+                "type": "http.request",
+                "body": bytes(request_body),
+                "more_body": False,
+            }
+
+        await self.downstream_app(scope, replay_body, send)
+
+    @staticmethod
+    async def _body_too_large(scope, receive, send):
+        response = JSONResponse(
+            status_code=413,
+            content={"detail": "Request body exceeds the allowed size."},
+        )
+        await response(scope, receive, send)
+
+
+app.add_middleware(AskProtectionMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+):
+    if request.url.path == "/ask":
+        return JSONResponse(
+            status_code=422,
+            content={"detail": "Invalid assistant request."},
+        )
+    return await request_validation_exception_handler(request, exc)
+
+
+_import_bearer = HTTPBearer(auto_error=False)
+
+
+def require_import_authorization(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_import_bearer),
+) -> None:
+    """Require a server-configured bearer token before running data imports."""
+    expected_token = os.getenv("FRAUDTRACE_IMPORT_API_KEY")
+    if not expected_token:
+        raise HTTPException(
+            status_code=503,
+            detail="AMLSim import authentication is not configured.",
+        )
+
+    provided_token = (
+        credentials.credentials
+        if credentials is not None and credentials.scheme.lower() == "bearer"
+        else ""
+    )
+    if not hmac.compare_digest(
+        provided_token.encode("utf-8"),
+        expected_token.encode("utf-8"),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Missing or invalid bearer token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 # ============================================================
@@ -159,6 +361,7 @@ def get_stats_for_dataset(dataset_id: str):
 @app.post("/import-amlsim")
 def import_amlsim_dataset(
     dry_run: bool = Query(default=False),
+    _: None = Depends(require_import_authorization),
 ):
     """Trigger the IBM AMLSim CSV import pipeline."""
     try:
@@ -201,11 +404,11 @@ def import_amlsim_dataset(
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"AMLSim import failed: {exc}",
-        ) from exc
+            detail="AMLSim import failed.",
+        )
 
 
 # ============================================================
@@ -568,6 +771,7 @@ def get_account_graph(
 
         raw_nodes, raw_edges = result.result_set[0]
         nodes_by_id = {}
+        hidden_node_ids = set()
 
         for item in raw_nodes or []:
             if not item:
@@ -579,12 +783,20 @@ def get_account_graph(
                 continue
 
             labels = item.get("labels") or []
+            if "InvestigationMemory" in labels:
+                hidden_node_ids.add(node_id)
+                continue
+
+            label = labels[0] if labels else "Unknown"
 
             nodes_by_id[node_id] = {
                 "id": node_id,
-                "label": labels[0] if labels else "Unknown",
+                "label": label,
                 "labels": labels,
-                "properties": item.get("properties") or {},
+                "properties": _filter_public_graph_properties(
+                    label,
+                    item.get("properties"),
+                ),
             }
 
         edges = []
@@ -599,6 +811,14 @@ def get_account_graph(
             relationship = item.get("relationship")
 
             if not source or not target or not relationship:
+                continue
+
+            if (
+                source in hidden_node_ids
+                or target in hidden_node_ids
+                or source not in nodes_by_id
+                or target not in nodes_by_id
+            ):
                 continue
 
             edge_key = (source, target, relationship)
@@ -655,72 +875,14 @@ def get_case_history(
     ),
     dataset: str = Query(default="demo_synthetic"),
 ):
-    """Retrieve historical investigation observations."""
-    try:
-        dataset_id = validate_dataset_id(dataset)
-
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    account_id = account_id.strip().upper()
-
-    if session_id is not None:
-        session_id = session_id.strip()
-
-        if not session_id:
-            raise HTTPException(
-                status_code=422,
-                detail="session_id cannot be blank.",
-            )
-
-    try:
-        result = get_recent_investigation_memories(
-            account_id=account_id,
-            limit=limit,
-            session_id=session_id,
-            dataset_id=dataset_id,
-        )
-
-        if not isinstance(result, dict):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "The case-history service returned "
-                    "an invalid response."
-                ),
-            )
-
-        return {
-            **result,
-            "warning": (
-                "Historical investigation memories are unverified "
-                "observations. Review current graph evidence before "
-                "drawing conclusions."
-            ),
-        }
-
-    except HTTPException:
-        raise
-
-    except LookupError as exc:
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        ) from exc
-
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=str(exc),
-        ) from exc
-
-    except Exception as exc:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                f"Unable to retrieve case history from FalkorDB: {exc}"
-            ),
-        ) from exc
+    """Deny history access until verified identities and case grants exist."""
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Case history requires authenticated identity and "
+            "case-specific authorization."
+        ),
+    )
 
 
 # ============================================================
@@ -757,6 +919,7 @@ def ask_investigation(request: AskRequest):
             question=question,
             session_id=session_id,
             dataset_id=dataset_id,
+            include_previous_memories=False,
         )
 
         if result is None:
@@ -767,7 +930,7 @@ def ask_investigation(request: AskRequest):
         if result.get("error"):
             raise HTTPException(
                 status_code=503,
-                detail=f"The investigation assistant failed: {result['error']}",
+                detail="The investigation assistant is temporarily unavailable.",
             )
         if any(
             step.get("step") == "account_lookup"
@@ -787,14 +950,11 @@ def ask_investigation(request: AskRequest):
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "The investigation assistant could not complete "
-                f"the request: {exc}"
-            ),
-        ) from exc
+            detail="The investigation assistant is temporarily unavailable.",
+        )
 
 
 # ============================================================
@@ -812,12 +972,45 @@ def get_graph_paths(
     try:
         dataset_id = validate_dataset_id(dataset)
 
-        return find_graph_paths(
+        result = find_graph_paths(
             source_id=source,
             target_id=target,
             max_hops=hops,
             dataset_id=dataset_id,
         )
+        public_paths = [
+            path
+            for path in result.get("paths", [])
+            if not any(
+                node.get("label") == "InvestigationMemory"
+                for node in path.get("nodes", [])
+            )
+        ]
+        result["paths"] = public_paths
+        result["path_count"] = len(public_paths)
+        max_hops = result.get("max_hops", hops)
+        if public_paths:
+            result["message"] = (
+                f"Discovered {len(public_paths)} path(s) within "
+                f"{max_hops} hop(s)."
+            )
+        else:
+            result["message"] = (
+                f"No public graph connection found between {source} and "
+                f"{target} within {max_hops} hop(s)."
+            )
+        for path in public_paths:
+            path["nodes"] = [
+                {
+                    **node,
+                    "properties": _filter_public_graph_properties(
+                        node.get("label", "Unknown"),
+                        node.get("properties"),
+                    ),
+                }
+                for node in path.get("nodes", [])
+            ]
+        return result
 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -875,6 +1068,16 @@ def search_entities(
             limit=limit,
             dataset_id=dataset_id,
         )
+        results = [
+            result
+            for result in results
+            if result.get("type") != "InvestigationMemory"
+        ]
+        for result in results:
+            result["properties"] = _filter_public_graph_properties(
+                result.get("type", "Unknown"),
+                result.get("properties"),
+            )
 
         return {
             "dataset_id": dataset_id,

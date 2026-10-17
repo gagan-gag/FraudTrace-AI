@@ -238,7 +238,14 @@ class InvestigationFlowTests(unittest.TestCase):
         self.assertIn("Investigation Overview", result["answer"])
         self.assertFalse(result["memory_saved"])
         self.assertEqual(result["investigation_steps"][-1]["status"], "failed")
-        self.assertIn("mock database unavailable", result["memory_save_error"])
+        self.assertEqual(
+            result["memory_save_error"],
+            "Unable to save the investigation memory.",
+        )
+        self.assertNotIn(
+            "mock database unavailable",
+            result["memory_save_error"],
+        )
 
     def test_alert_question_routes_and_renders_alert_fields_only(self):
         question = "Are there any AML alerts for AML_ACC_25?"
@@ -274,7 +281,7 @@ class InvestigationFlowTests(unittest.TestCase):
 
         self.assertEqual(result["intent"], "alert_review")
         self.assertIn(
-            "No AML alerts are linked to the account in the retrieved graph evidence.",
+            "No linked AML alerts were found in the retrieved evidence.",
             result["answer"],
         )
         self.assertNotIn("AML_ALERT_0", result["answer"])
@@ -384,7 +391,11 @@ class AskEndpointTests(unittest.TestCase):
                 ask_investigation(request)
 
         self.assertEqual(raised.exception.status_code, 503)
-        self.assertIn("provider response invalid", raised.exception.detail)
+        self.assertEqual(
+            raised.exception.detail,
+            "The investigation assistant is temporarily unavailable.",
+        )
+        self.assertNotIn("provider response invalid", raised.exception.detail)
 
 
 if __name__ == "__main__":

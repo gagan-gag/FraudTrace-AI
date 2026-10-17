@@ -189,8 +189,8 @@ NETWORK_TERMS = (
     "connect", "connected", "related account", "related accounts",
     "network", "device", "devices", "ip", "address", "shared",
     "connection", "connections", "path", "paths", "multi-hop",
-    "multihop", "linked account", "linked accounts", "neighbor", "neighbour",
-    "counterparty", "counterparties",
+    "multihop", "linked account", "linked accounts", "neighbor",
+    "neighbour", "counterparty", "counterparties",
 )
 
 ALERT_TERMS = ("alert", "alerts")
@@ -220,7 +220,8 @@ def plan_investigation(question: str) -> dict[str, Any]:
     asks_alerts = any(term in normalized for term in ALERT_TERMS)
     asks_risk = any(term in normalized for term in RISK_TERMS)
 
-    if not (asks_network or asks_transactions or asks_alerts):
+    focus_count = sum((asks_network, asks_transactions, asks_alerts))
+    if not focus_count:
         tools = [
             "connected_account_signals",
             "transaction_evidence",
@@ -234,21 +235,13 @@ def plan_investigation(question: str) -> dict[str, Any]:
         if asks_transactions or asks_alerts:
             tools.append("transaction_evidence")
 
-    focus_count = sum((asks_network, asks_transactions, asks_alerts))
-    if focus_count > 1:
-        intent = "combined_investigation"
-    elif asks_alerts:
-        intent = "alert_review"
-    elif asks_network:
-        intent = "network_investigation"
-    elif asks_transactions:
-        intent = "transaction_review"
-    elif asks_risk:
-        intent = "risk_review"
+    if not focus_count:
+        requested_sections = [
+            "connected_accounts",
+            "transactions",
+            "alerts",
+        ]
     else:
-        intent = "general_investigation"
-
-    if focus_count:
         requested_sections = []
         if asks_network:
             requested_sections.append("connected_accounts")
@@ -256,8 +249,19 @@ def plan_investigation(question: str) -> dict[str, Any]:
             requested_sections.append("transactions")
         if asks_alerts:
             requested_sections.append("alerts")
+
+    if asks_risk and not focus_count:
+        intent = "risk_review"
+    elif focus_count > 1:
+        intent = "combined_investigation"
+    elif asks_alerts:
+        intent = "alert_review"
+    elif asks_network:
+        intent = "network_investigation"
+    elif asks_transactions:
+        intent = "transaction_review"
     else:
-        requested_sections = ["connected_accounts", "transactions", "alerts"]
+        intent = "general_investigation"
 
     return {
         "intent": intent,
@@ -674,7 +678,10 @@ def _format_graph_evidence_answer(
     if show_connections:
         lines = []
         if not related_accounts:
-            lines.append("- No connected accounts were returned by the selected graph query.")
+            if dataset_id == "ibm_amlsim":
+                lines.append("- No connected AML counterparties were found.")
+            else:
+                lines.append("- No connected accounts were returned by the selected graph query.")
         else:
             for item in related_accounts[:10]:
                 account = item.get("account_id")
@@ -714,7 +721,7 @@ def _format_graph_evidence_answer(
     if show_transactions:
         lines = []
         if not transactions:
-            lines.append("- No transaction records were returned by the selected graph query.")
+            lines.append("- No transactions were found for this account.")
         else:
             for item in transactions[:10]:
                 transaction_id = item.get("transaction_id")
@@ -746,7 +753,7 @@ def _format_graph_evidence_answer(
     if show_alerts:
         lines = []
         if not alerts:
-            lines.append("- No AML alerts are linked to the account in the retrieved graph evidence.")
+            lines.append("- No alerts were found linked to this account.")
         else:
             for item in alerts[:10]:
                 alert_id = item.get("alert_id")
@@ -1060,6 +1067,7 @@ def investigate_question(
     question: str,
     session_id: str = "default",
     dataset_id: str = "demo_synthetic",
+    include_previous_memories: bool = True,
 ) -> dict[str, Any]:
     """
     Retrieve current evidence and prior memories, generate an answer,
@@ -1164,30 +1172,34 @@ def investigate_question(
             r_row = account_check.result_set[0]
             risk_label = "HIGH (isFraud=True)" if r_row[1] else "MEDIUM (suspicious=True)" if r_row[2] else "LOW"
 
-        # Load prior memories, scoped to this account, session, and dataset.
-        stage = "retrieve_previous_memories"
-        try:
-            memory_result = get_recent_investigation_memories(
-                account_id=account_id,
-                limit=MAX_MEMORY_ITEMS,
-                session_id=session_id,
-                dataset_id=dataset_id,
-            )
-            previous_memories = memory_result.get("memories", [])
+        if include_previous_memories:
+            stage = "retrieve_previous_memories"
+            try:
+                memory_result = get_recent_investigation_memories(
+                    account_id=account_id,
+                    limit=MAX_MEMORY_ITEMS,
+                    session_id=session_id,
+                    dataset_id=dataset_id,
+                )
+                previous_memories = memory_result.get("memories", [])
+                steps.append({
+                    "step": "retrieve_previous_memories",
+                    "status": "completed",
+                })
+            except Exception as exc:
+                logger.warning(
+                    "Investigation stage=%s exception_type=%s",
+                    stage,
+                    type(exc).__name__,
+                )
+                steps.append({
+                    "step": "retrieve_previous_memories",
+                    "status": "failed",
+                })
+        else:
             steps.append({
                 "step": "retrieve_previous_memories",
-                "status": "completed",
-            })
-        except Exception as exc:
-            logger.warning(
-                "Investigation stage=%s exception_type=%s",
-                stage,
-                type(exc).__name__,
-                exc_info=True,
-            )
-            steps.append({
-                "step": "retrieve_previous_memories",
-                "status": "failed",
+                "status": "skipped_unverified_identity",
             })
 
         # Retrieve only the evidence tools selected for this question.
@@ -1273,7 +1285,7 @@ def investigate_question(
         }
 
         # Produce an AI answer using bounded context.
-        stage = "answer_generation"
+        stage = "natural_language_answer"
         answer, answer_method = _answer_with_llm(
             account_id=account_id,
             question=question,
@@ -1311,12 +1323,11 @@ def investigate_question(
                 ),
             })
         except Exception as exc:
-            memory_save_error = str(exc)
+            memory_save_error = "Unable to save the investigation memory."
             logger.warning(
                 "Investigation stage=%s exception_type=%s",
                 stage,
                 type(exc).__name__,
-                exc_info=True,
             )
             steps.append({
                 "step": "save_investigation_memory",
@@ -1365,7 +1376,6 @@ def investigate_question(
             "Investigation stage=%s exception_type=%s",
             stage,
             type(exc).__name__,
-            exc_info=True,
         )
         return {
             "account_id": account_id,
@@ -1381,6 +1391,6 @@ def investigate_question(
             "memory_saved": False,
             "previous_memories": previous_memories,
             "memory_count": len(previous_memories),
-            "error": str(exc),
+            "error": "The investigation could not be completed.",
             "warning": warning_text,
         }

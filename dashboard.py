@@ -2096,24 +2096,10 @@ elif selected_view == "AI Assistant":
             st.caption(f"Session: `{st.session_state.assistant_chat_session_id[:12]}…`")
             st.markdown(f"**Account:** `{assistant_account or current_acc}`")
             st.markdown(f"**Messages this session:** {len(st.session_state.assistant_messages)}")
-
-            if st.button("Load prior memories", key="load_memories_btn", use_container_width=True):
-                try:
-                    mem_data = api_get(f"/case-history/{assistant_account or current_acc}", params={"limit": 3, "dataset": current_ds})
-                    mems = mem_data.get("memories", [])
-                    if mems:
-                        for m in mems:
-                            st.markdown(
-                                f"<div style='background:#F8FAFC; border:1px solid #E2E8F0; border-radius:6px; padding:8px; margin-bottom:6px; font-size:11px;'>"
-                                f"<b>Q:</b> {m.get('question', '')[:80]}…<br>"
-                                f"<b>A:</b> {m.get('answer', '')[:120]}…"
-                                "</div>",
-                                unsafe_allow_html=True,
-                            )
-                    else:
-                        st.info("No prior memories found.")
-                except Exception as exc:
-                    st.error(f"Memory load failed: {exc}")
+            st.info(
+                "Saved case history is unavailable until sign-in and "
+                "case-specific access controls are configured."
+            )
 
         # Evidence Summary Card
         with st.container(border=True):
@@ -2377,41 +2363,15 @@ RETURN graph_nodes, collect(DISTINCT r) AS graph_edges;
 
 elif selected_view == "Case Memory":
     st.subheader("📁 Persistent Case Memory (Track 02)")
-    st.caption("Search and review previous investigations stored in FalkorDB. Survives process restarts.")
-
-    mem_col1, mem_col2 = st.columns([3, 1])
-    with mem_col1:
-        mem_acc = st.text_input("Account ID for Memory", value=current_acc).strip().upper()
-    with mem_col2:
-        mem_limit = st.selectbox("Max Records", options=[5, 10, 20, 50], index=1)
-
-    if st.button("Load Case History", type="primary"):
-        st.session_state.load_mem_trigger = True
-
-    try:
-        mem_data = api_get(f"/case-history/{mem_acc}", params={"limit": mem_limit, "dataset": current_ds})
-        memories = mem_data.get("memories", [])
-
-        st.markdown(f"**Retrieved {len(memories)} investigation memories for {mem_acc}:**")
-
-        if memories:
-            for idx, m in enumerate(memories, start=1):
-                status = m.get("verification_status", "unverified")
-                created = m.get("created_at", "Unknown")
-                q = m.get("question", "Untitled")
-                ans = m.get("answer", "No answer stored.")
-
-                with st.expander(f"{idx}. {q} · {created} [{status}]", expanded=(idx == 1)):
-                    st.markdown(f"**Intent:** `{m.get('intent', 'general_investigation')}` | **Session:** `{m.get('session_id', 'default')}`")
-                    st.markdown("**AI Investigation Summary:**")
-                    st.write(ans)
-                    if m.get("evidence"):
-                        st.markdown("**Stored Graph Evidence:**")
-                        st.json(m["evidence"])
-        else:
-            st.info("No prior investigation memories stored for this account.")
-    except Exception as exc:
-        st.error(f"Could not load case history: {exc}")
+    st.caption(
+        "Historical investigation memory is stored in FalkorDB but is "
+        "restricted until authenticated identities and per-case access "
+        "grants are implemented."
+    )
+    st.info(
+        "Case-history access is disabled. Account IDs and dashboard "
+        "sessions are not authorization credentials."
+    )
 
 
 # ============================================================
@@ -2420,7 +2380,11 @@ elif selected_view == "Case Memory":
 
 elif selected_view == "Reports":
     st.subheader("📄 Export Investigation Case Report")
-    st.caption("Generate a structured, court-ready PDF containing graph evidence, transaction tables, and AI findings.")
+    st.caption(
+        "Generate a structured investigation PDF with graph evidence, "
+        "transaction records, and assistant findings. This report is for "
+        "review and is not certified forensic evidence."
+    )
 
     rep_col1, rep_col2 = st.columns([3, 1])
     with rep_col1:
